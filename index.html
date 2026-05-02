@@ -1,0 +1,2196 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SK AutoFlip Enterprise v7.0</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body { background: #020817; color: #F1F5F9; font-family: 'IBM Plex Sans', sans-serif; -webkit-font-smoothing: antialiased; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #0A1628; }
+        ::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 2px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        import React, { useState, useEffect, useCallback, useMemo } from 'https://esm.sh/react@18.2.0';
+        import ReactDOM from 'https://esm.sh/react-dom@18.2.0/client';
+        import {
+            LayoutDashboard, Plus, Trophy, Star, BarChart2, DollarSign,
+            TrendingUp, AlertTriangle, CheckCircle,
+            ChevronDown, Download, RefreshCw,
+            Zap, Target, Trash2, Eye, Layers, Upload,
+            CheckSquare, Square, Info, X, Calculator,
+        } from 'https://esm.sh/lucide-react@0.263.1';
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // BASE DE DONNÉES
+        // ─────────────────────────────────────────────────────────────────────────────
+
+        const DEFAUTS = {
+            moteur_hs:    { label: "Moteur hors service",        cout: 800,  risque: "critical" },
+            boite:        { label: "Boîte de vitesses HS",        cout: 600,  risque: "critical" },
+            embrayage:    { label: "Embrayage à remplacer",       cout: 350,  risque: "high" },
+            courroie:     { label: "Courroie de distribution",    cout: 250,  risque: "high" },
+            carrosserie:  { label: "Carrosserie endommagée",      cout: 400,  risque: "medium" },
+            ct_negatif:   { label: "CT négatif / refusé",         cout: 300,  risque: "medium" },
+            suspension:   { label: "Suspensions défaillantes",    cout: 300,  risque: "medium" },
+            freins:       { label: "Circuit de freinage",         cout: 200,  risque: "medium" },
+            pneumatiques: { label: "Pneumatiques à remplacer",    cout: 200,  risque: "low" },
+            climatisation:{ label: "Climatisation inopérante",    cout: 250,  risque: "low" },
+            parebrise:    { label: "Pare-brise fissuré",          cout: 150,  risque: "low" },
+            rouille:      { label: "Rouille structurelle",        cout: 300,  risque: "medium" },
+            accident:     { label: "Véhicule accidenté",          cout: 500,  risque: "critical" },
+        };
+
+        const CATEGORIES = [
+            { id: "vehicule", label: "Véhicule complet" },
+            { id: "moteur", label: "Moteur" },
+            { id: "boite", label: "Boîte de vitesses" },
+            { id: "piece", label: "Pièce diverse" },
+        ];
+
+        const PIPELINE_STATUTS = [
+            { id: "prospect", label: "Prospect", color: "#6366F1" },
+            { id: "offre", label: "Offre envoyée", color: "#F59E0B" },
+            { id: "stock", label: "En stock", color: "#3B82F6" },
+            { id: "en_vente", label: "En vente", color: "#8B5CF6" },
+            { id: "vendu", label: "Vendu", color: "#10B981" },
+        ];
+
+        const SOURCES = [
+            { id: "leboncoin", label: "Leboncoin" },
+            { id: "ebay", label: "eBay" },
+            { id: "lacentrale", label: "La Centrale" },
+            { id: "facebook", label: "Facebook" },
+            { id: "scraper", label: "Auto-import" },
+            { id: "manuel", label: "Manuel" },
+        ];
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // HOOK VALUATION
+        // ─────────────────────────────────────────────────────────────────────────────
+
+        function useValuation() {
+            const _getVerdict = (score) => {
+                if (score >= 80) return { label: "EXCELLENT", color: "#10B981" };
+                if (score >= 60) return { label: "ACCEPTABLE", color: "#F59E0B" };
+                if (score >= 40) return { label: "RISQUÉ", color: "#EF4444" };
+                return { label: "ÉVITER", color: "#7F1D1D" };
+            };
+
+            const calculerRentabilite = useCallback(({
+                prixAchat, coutReparation = 0, prixRevente,
+                distanceKm = 0, tauxKm = 0.35,
+                mainOeuvre = 0, tvaActive = false,
+            }) => {
+                const fraisLogistique = distanceKm * tauxKm;
+                const coutBrut = prixAchat + coutReparation + mainOeuvre + fraisLogistique + 50;
+                const margeAvantTVA = prixRevente - coutBrut;
+                const tva = tvaActive ? margeAvantTVA * 0.1667 : 0;
+                const margeNette = margeAvantTVA - tva;
+                const roi = coutBrut > 0 ? Math.round((margeNette / coutBrut) * 100) : 0;
+                return { fraisLogistique: Math.round(fraisLogistique), coutTotal: Math.round(coutBrut), margeNette: Math.round(margeNette), roi };
+            }, []);
+
+            const scorer = useCallback((annonce) => {
+                let score = 100;
+                const alertes = [], positifs = [];
+                
+                const prix = parseFloat(annonce.prix) || 0;
+                const km = parseInt(annonce.km) || 0;
+                
+                if (prix > 10000) { alertes.push("Prix très élevé"); score -= 15; }
+                if (km > 200000) { alertes.push("Kilométrage excessif"); score -= 20; }
+                if (annonce.defauts?.length > 0) { alertes.push(\`\${annonce.defauts.length} défaut(s) détecté(s)\`); score -= 10 * annonce.defauts.length; }
+                if (annonce.vendeur === "pro") { positifs.push("Professionnel"); score += 5; }
+                
+                score = Math.max(0, Math.min(100, score));
+                const coutRep = annonce.defauts?.reduce((s, k) => s + (DEFAUTS[k]?.cout || 0), 0) || 0;
+                const rent = annonce.prixRevente ? calculerRentabilite({ prixAchat: prix, coutReparation: coutRep, prixRevente: parseFloat(annonce.prixRevente) }) : null;
+                
+                return { score, verdict: _getVerdict(score), alertes, positifs, coutReparation: coutRep, rentabilite: rent };
+            }, [calculerRentabilite]);
+
+            return { scorer, calculerRentabilite };
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // UTILITAIRES
+        // ─────────────────────────────────────────────────────────────────────────────
+
+        const fmt = (n, suffix = "") => !n ? "—" : parseFloat(n).toLocaleString("fr-FR") + suffix;
+        const fmtPct = (n) => !n ? "—" : (n >= 0 ? "+" : "") + n + "%";
+
+        function exportCSV(data) {
+            const header = ["Titre", "Prix", "Km", "Score", "Marge", "ROI"];
+            const rows = data.map(r => [r.titre, r.prix, r.km, r.score || "", r.rentabilite?.margeNette || "", r.rentabilite?.roi || ""]);
+            const csv = [header, ...rows].map(l => l.join(";")).join("\\r\\n");
+            const blob = new Blob(["\\uFEFF" + csv], { type: "text/csv" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = \`sk-autoflip-\${new Date().toISOString().slice(0,10)}.csv\`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // COMPOSANTS
+        // ─────────────────────────────────────────────────────────────────────────────
+
+        function KpiCard({ label, value, icon: Icon }) {
+            return React.createElement('div', { style: { background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 16 } },
+                React.createElement('div', { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                    React.createElement('span', { style: { fontSize: 11, color: "#4B5563", textTransform: "uppercase" } }, label),
+                    Icon ? React.createElement(Icon, { size: 16, color: "#6366F1" }) : null
+                ),
+                React.createElement('div', { style: { fontSize: 28, fontWeight: 800, color: "#F1F5F9", marginTop: 8 } }, value)
+            );
+        }
+
+        function Btn({ children, onClick, variant = "primary", icon: Icon, disabled }) {
+            const style = variant === "primary" ? { background: "#6366F1", color: "#fff", border: "none" } : { background: "transparent", color: "#94A3B8", border: "1px solid #1E293B" };
+            return React.createElement('button', {
+                onClick,
+                disabled,
+                style: { display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 5, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1, ...style }
+            },
+                Icon ? React.createElement(Icon, { size: 14 }) : null,
+                children
+            );
+        }
+
+        function DataTable({ data, onDelete, onView }) {
+            const [sortCol, setSortCol] = useState("score");
+            const [filter, setFilter] = useState("");
+
+            const filtered = useMemo(() => {
+                let d = [...data];
+                if (filter) d = d.filter(r => (r.titre || "").toLowerCase().includes(filter.toLowerCase()));
+                d.sort((a, b) => {
+                    const va = a[sortCol] || 0;
+                    const vb = b[sortCol] || 0;
+                    return vb - va;
+                });
+                return d;
+            }, [data, filter, sortCol]);
+
+            return React.createElement('div', { style: { display: "flex", flexDirection: "column", gap: 12 } },
+                React.createElement('input', {
+                    value: filter,
+                    onChange: (e) => setFilter(e.target.value),
+                    placeholder: "Rechercher...",
+                    style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5, width: "100%", fontFamily: "'IBM Plex Mono'" }
+                }),
+                React.createElement('div', { style: { overflowX: "auto", border: "1px solid #1E293B", borderRadius: 8 } },
+                    React.createElement('table', { style: { width: "100%", borderCollapse: "collapse", fontSize: 12 } },
+                        React.createElement('thead', null,
+                            React.createElement('tr', { style: { background: "#0A1628" } },
+                                React.createElement('th', { onClick: () => setSortCol("titre"), style: { padding: "10px", textAlign: "left", fontSize: 10, fontWeight: 600, cursor: "pointer", borderBottom: "1px solid #1E293B" } }, "Titre"),
+                                React.createElement('th', { onClick: () => setSortCol("prix"), style: { padding: "10px", textAlign: "right", fontSize: 10, fontWeight: 600, cursor: "pointer", borderBottom: "1px solid #1E293B" } }, "Prix"),
+                                React.createElement('th', { onClick: () => setSortCol("score"), style: { padding: "10px", textAlign: "right", fontSize: 10, fontWeight: 600, cursor: "pointer", borderBottom: "1px solid #1E293B" } }, "Score"),
+                                React.createElement('th', { onClick: () => setSortCol("km"), style: { padding: "10px", textAlign: "right", fontSize: 10, fontWeight: 600, cursor: "pointer", borderBottom: "1px solid #1E293B" } }, "Km"),
+                                React.createElement('th', { style: { padding: "10px", textAlign: "right", fontSize: 10, fontWeight: 600, borderBottom: "1px solid #1E293B" } }, "Actions")
+                            )
+                        ),
+                        React.createElement('tbody', null,
+                            filtered.map((r, i) => React.createElement('tr', { key: r.id, style: { background: i % 2 === 0 ? "#0A1628" : "#0F172A", borderBottom: "1px solid #0F172A" } },
+                                React.createElement('td', { style: { padding: 10, color: "#D1D5DB" } }, r.titre),
+                                React.createElement('td', { style: { padding: 10, textAlign: "right", color: "#F59E0B", fontWeight: 600 } }, fmt(r.prix, " €")),
+                                React.createElement('td', { style: { padding: 10, textAlign: "right", color: r.verdict?.color, fontWeight: 600 } }, r.score || "—"),
+                                React.createElement('td', { style: { padding: 10, textAlign: "right", color: "#94A3B8" } }, r.km ? r.km.toLocaleString("fr") + " km" : "—"),
+                                React.createElement('td', { style: { padding: 10, textAlign: "right", display: "flex", gap: 6, justifyContent: "flex-end" } },
+                                    React.createElement('button', { onClick: () => onView(r), style: { background: "none", border: "none", cursor: "pointer", color: "#6366F1", padding: 4 } }, React.createElement(Eye, { size: 14 })),
+                                    React.createElement('button', { onClick: () => onDelete(r.id), style: { background: "none", border: "none", cursor: "pointer", color: "#EF4444", padding: 4 } }, React.createElement(Trash2, { size: 14 }))
+                                )
+                            ))
+                        )
+                    )
+                )
+            );
+        }
+
+        function FormModal({ onSubmit, onClose }) {
+            const [f, setF] = useState({ titre: "", prix: "", km: "", categorie: "vehicule", vendeur: "particulier", prixRevente: "", defauts: [] });
+
+            const submit = () => {
+                if (!f.titre || !f.prix || !f.categorie) { alert("Remplissez les champs obligatoires"); return; }
+                onSubmit({ ...f, id: Date.now() });
+                setF({ titre: "", prix: "", km: "", categorie: "vehicule", vendeur: "particulier", prixRevente: "", defauts: [] });
+            };
+
+            return React.createElement('div', { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }, onClick: onClose },
+                React.createElement('div', { onClick: (e) => e.stopPropagation(), style: { background: "#060F1E", border: "1px solid #1E293B", borderRadius: 10, padding: 24, width: "100%", maxWidth: 500 } },
+                    React.createElement('h2', { style: { marginBottom: 16 } }, "Nouvelle opportunité"),
+                    React.createElement('div', { style: { display: "flex", flexDirection: "column", gap: 12 } },
+                        React.createElement('input', { placeholder: "Titre *", value: f.titre, onChange: (e) => setF({ ...f, titre: e.target.value }), style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5 } }),
+                        React.createElement('input', { placeholder: "Prix (€) *", type: "number", value: f.prix, onChange: (e) => setF({ ...f, prix: e.target.value }), style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5 } }),
+                        React.createElement('input', { placeholder: "Kilométrage", type: "number", value: f.km, onChange: (e) => setF({ ...f, km: e.target.value }), style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5 } }),
+                        React.createElement('input', { placeholder: "Prix revente (€)", type: "number", value: f.prixRevente, onChange: (e) => setF({ ...f, prixRevente: e.target.value }), style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5 } }),
+                        React.createElement('select', { value: f.categorie, onChange: (e) => setF({ ...f, categorie: e.target.value }), style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5 } },
+                            CATEGORIES.map(c => React.createElement('option', { key: c.id, value: c.id }, c.label))
+                        ),
+                        React.createElement('select', { value: f.vendeur, onChange: (e) => setF({ ...f, vendeur: e.target.value }), style: { background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9", padding: "8px 12px", borderRadius: 5 } },
+                            React.createElement('option', { value: "particulier" }, "Particulier"),
+                            React.createElement('option', { value: "pro" }, "Professionnel")
+                        ),
+                        React.createElement('div', { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 4 } },
+                            Object.entries(DEFAUTS).map(([k, v]) => React.createElement('label', { key: k, style: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#94A3B8", cursor: "pointer" } },
+                                React.createElement('input', { type: "checkbox", checked: f.defauts.includes(k), onChange: (e) => setF({ ...f, defauts: e.target.checked ? [...f.defauts, k] : f.defauts.filter(x => x !== k) }), style: { cursor: "pointer" } }),
+                                v.label
+                            ))
+                        )
+                    ),
+                    React.createElement('div', { style: { display: "flex", gap: 8, marginTop: 16, paddingTop: 16, borderTop: "1px solid #1E293B" } },
+                        React.createElement(Btn, { onClick: onClose, variant: "secondary" }, "Annuler"),
+                        React.createElement(Btn, { onClick: submit }, "Ajouter")
+                    )
+                )
+            );
+        }
+
+        function DetailModal({ annonce, onClose }) {
+            if (!annonce) return null;
+            return React.createElement('div', { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }, onClick: onClose },
+                React.createElement('div', { onClick: (e) => e.stopPropagation(), style: { background: "#060F1E", border: "1px solid #1E293B", borderRadius: 10, padding: 24, width: "100%", maxWidth: 600, maxHeight: "80vh", overflowY: "auto" } },
+                    React.createElement('div', { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 } },
+                        React.createElement('h2', null, annonce.titre),
+                        React.createElement('button', { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#94A3B8" } }, "×")
+                    ),
+                    React.createElement('div', { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginBottom: 16 } },
+                        React.createElement('div', null,
+                            React.createElement('div', { style: { fontSize: 10, color: "#374151" } }, "Prix"),
+                            React.createElement('div', { style: { fontSize: 16, fontWeight: 700, color: "#F59E0B" } }, fmt(annonce.prix, " €"))
+                        ),
+                        React.createElement('div', null,
+                            React.createElement('div', { style: { fontSize: 10, color: "#374151" } }, "Score"),
+                            React.createElement('div', { style: { fontSize: 16, fontWeight: 700, color: annonce.verdict?.color } }, annonce.score || "—")
+                        ),
+                        React.createElement('div', null,
+                            React.createElement('div', { style: { fontSize: 10, color: "#374151" } }, "Kilométrage"),
+                            React.createElement('div', { style: { fontSize: 14, fontWeight: 600 } }, annonce.km ? annonce.km.toLocaleString("fr") + " km" : "—")
+                        ),
+                        React.createElement('div', null,
+                            React.createElement('div', { style: { fontSize: 10, color: "#374151" } }, "Vendeur"),
+                            React.createElement('div', { style: { fontSize: 14, fontWeight: 600 } }, annonce.vendeur === "pro" ? "Professionnel" : "Particulier")
+                        )
+                    ),
+                    annonce.alertes?.length > 0 && React.createElement('div', { style: { marginBottom: 16 } },
+                        React.createElement('h3', { style: { fontSize: 12, marginBottom: 8 } }, "⚠️ Alertes"),
+                        React.createElement('ul', { style: { color: "#EF4444", fontSize: 11, lineHeight: 1.8 } },
+                            annonce.alertes.map((a, i) => React.createElement('li', { key: i }, a))
+                        )
+                    ),
+                    annonce.positifs?.length > 0 && React.createElement('div', { style: { marginBottom: 16 } },
+                        React.createElement('h3', { style: { fontSize: 12, marginBottom: 8 } }, "✓ Points positifs"),
+                        React.createElement('ul', { style: { color: "#10B981", fontSize: 11, lineHeight: 1.8 } },
+                            annonce.positifs.map((p, i) => React.createElement('li', { key: i }, p))
+                        )
+                    ),
+                    annonce.rentabilite && React.createElement('div', { style: { background: "#0A1628", borderRadius: 8, padding: 12, marginBottom: 16 } },
+                        React.createElement('h3', { style: { fontSize: 12, marginBottom: 8 } }, "💰 Rentabilité"),
+                        React.createElement('div', { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, fontSize: 11 } },
+                            React.createElement('div', null, React.createElement('div', { style: { color: "#374151" } }, "Coût total"), React.createElement('div', { style: { fontWeight: 700 } }, fmt(annonce.rentabilite.coutTotal, " €"))),
+                            React.createElement('div', null, React.createElement('div', { style: { color: "#374151" } }, "Marge nette"), React.createElement('div', { style: { fontWeight: 700, color: "#10B981" } }, fmt(annonce.rentabilite.margeNette, " €"))),
+                            React.createElement('div', null, React.createElement('div', { style: { color: "#374151" } }, "ROI"), React.createElement('div', { style: { fontWeight: 700 } }, fmtPct(annonce.rentabilite.roi)))
+                        )
+                    ),
+                    React.createElement('button', { onClick: onClose, style: { width: "100%", padding: "10px", background: "#6366F1", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", fontWeight: 600 } }, "Fermer")
+                )
+            );
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // APP
+        // ─────────────────────────────────────────────────────────────────────────────
+
+        function App() {
+            const [annonces, setAnnonces] = useState([]);
+            const [showForm, setShowForm] = useState(false);
+            const [detail, setDetail] = useState(null);
+            const { scorer } = useValuation();
+
+            useEffect(() => {
+                try {
+                    const data = localStorage.getItem("sk7_annonces");
+                    if (data) setAnnonces(JSON.parse(data));
+                } catch {}
+            }, []);
+
+            useEffect(() => {
+                try {
+                    localStorage.setItem("sk7_annonces", JSON.stringify(annonces));
+                } catch {}
+            }, [annonces]);
+
+            const handleAdd = useCallback((a) => {
+                const scored = { ...a, ...scorer(a) };
+                setAnnonces(prev => [...prev, scored]);
+                setShowForm(false);
+            }, [scorer]);
+
+            const handleDelete = (id) => setAnnonces(prev => prev.filter(a => a.id !== id));
+
+            const excellent = annonces.filter(a => a.score >= 80).length;
+            const margeTotal = annonces.reduce((s, a) => s + (a.rentabilite?.margeNette || 0), 0);
+
+            return React.createElement('div', { style: { minHeight: "100vh", background: "#020817", color: "#F1F5F9", padding: 20 } },
+                React.createElement('div', { style: { maxWidth: 1100, margin: "0 auto" } },
+                    React.createElement('div', { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 30 } },
+                        React.createElement('div', { style: { display: "flex", alignItems: "center", gap: 12 } },
+                            React.createElement('div', { style: { width: 40, height: 40, background: "#6366F1", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" } },
+                                React.createElement(Target, { size: 20, color: "#fff" })
+                            ),
+                            React.createElement('div', null,
+                                React.createElement('h1', { style: { margin: 0, fontSize: 24 } }, "SK AutoFlip Enterprise"),
+                                React.createElement('p', { style: { margin: "4px 0 0", fontSize: 12, color: "#4B5563" } }, "v7.0 ✓ Corrigé & Amélioré")
+                            )
+                        ),
+                        React.createElement('div', { style: { display: "flex", gap: 8 } },
+                            React.createElement(Btn, { onClick: () => exportCSV(annonces), icon: Download }, "Export"),
+                            React.createElement(Btn, { onClick: () => setShowForm(true), icon: Plus }, "Ajouter")
+                        )
+                    ),
+
+                    React.createElement('div', { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 30 } },
+                        React.createElement(KpiCard, { label: "Annonces", value: annonces.length, icon: Layers }),
+                        React.createElement(KpiCard, { label: "Analysées", value: annonces.filter(a => a.score).length, icon: BarChart2 }),
+                        React.createElement(KpiCard, { label: "Excellent", value: excellent, icon: Trophy }),
+                        React.createElement(KpiCard, { label: "Marge totale", value: fmt(margeTotal, " €"), icon: DollarSign })
+                    ),
+
+                    React.createElement('div', { style: { background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 24 } },
+                        React.createElement('h2', { style: { fontSize: 14, marginBottom: 16, fontWeight: 700 } }, "Opportunités"),
+                        annonces.length === 0 ? React.createElement('div', { style: { textAlign: "center", padding: "40px", color: "#1E293B" } }, "0 annonce — Commencez par en ajouter une") : React.createElement(DataTable, { data: annonces, onDelete: handleDelete, onView: setDetail })
+                    ),
+
+                    showForm && React.createElement(FormModal, { onSubmit: handleAdd, onClose: () => setShowForm(false) }),
+                    detail && React.createElement(DetailModal, { annonce: detail, onClose: () => setDetail(null) })
+                )
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html><!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SK AutoFlip Enterprise v7.0</title>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        import React from 'https://esm.sh/react@18.2.0';
+        import ReactDOM from 'https://esm.sh/react-dom@18.2.0/client';
+        
+        // App component will be mounted here
+    </script>
+</body>
+</html>
+
+import { useState, useEffect, useCallback, useMemo, useReducer, useRef } from "react";
+import {
+  LayoutDashboard, Plus, List, Trophy, Star, BookOpen, Settings,
+  TrendingUp, TrendingDown, AlertTriangle, CheckCircle, XCircle,
+  ChevronUp, ChevronDown, ChevronsUpDown, Download, Upload, RefreshCw,
+  Zap, Target, DollarSign, Truck, Wrench, Car, Package,
+  ArrowRight, ArrowUpRight, ArrowDownRight, Clock, Filter,
+  Search, MoreHorizontal, Eye, Trash2, Edit3, Copy, Link,
+  Activity, BarChart2, PieChart as PieIcon, Layers, Globe,
+  CheckSquare, Square, AlertCircle, Info, X, ChevronRight,
+  FileText, Clipboard, Send, Archive, ShoppingCart, Tag,
+  Calculator, Percent, MapPin, User, Building, ExternalLink,
+} from "lucide-react";
+import {
+  LineChart, Line, BarChart, Bar, AreaChart, Area,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine,
+} from "recharts";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 1 — BASE DE CONNAISSANCE (héritée + étendue)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Dictionnaire des défauts connus avec coûts de remise en état estimés */
+const DEFAUTS = {
+  moteur_hs:   { label: "Moteur hors service",        cout: 800,  risque: "critical", groupe: "mecanique" },
+  boite:       { label: "Boîte de vitesses HS",        cout: 600,  risque: "critical", groupe: "mecanique" },
+  embrayage:   { label: "Embrayage à remplacer",       cout: 350,  risque: "high",     groupe: "mecanique" },
+  courroie:    { label: "Courroie de distribution",    cout: 250,  risque: "high",     groupe: "mecanique" },
+  carrosserie: { label: "Carrosserie endommagée",      cout: 400,  risque: "medium",   groupe: "carrosserie" },
+  ct_negatif:  { label: "CT négatif / refusé",         cout: 300,  risque: "medium",   groupe: "admin" },
+  suspension:  { label: "Suspensions défaillantes",    cout: 300,  risque: "medium",   groupe: "chassis" },
+  freins:      { label: "Circuit de freinage",         cout: 200,  risque: "medium",   groupe: "chassis" },
+  pneumatiques:{ label: "Pneumatiques à remplacer",    cout: 200,  risque: "low",      groupe: "chassis" },
+  climatisation:{ label: "Climatisation inopérante",   cout: 250,  risque: "low",      groupe: "confort" },
+  parebrise:   { label: "Pare-brise fissuré",          cout: 150,  risque: "low",      groupe: "carrosserie" },
+  rouille:     { label: "Rouille structurelle",        cout: 300,  risque: "medium",   groupe: "carrosserie" },
+  accident:    { label: "Véhicule accidenté",          cout: 500,  risque: "critical",  groupe: "carrosserie" },
+};
+
+/** Mots-clés d'analyse sémantique — pièces mécaniques */
+const MOTS_MOTEUR = {
+  alerte:   ["bruit","cliquetis","fumée","fuite","huile","grippé","cassé","hs","non testé",
+             "vendu en l'état","problème","défaut","voyant","surchauffe","joint de culasse"],
+  positifs: ["testé","garanti","tournait bien","bon état","certifié","révisé","vidange",
+             "complet","fonctionnel","vérifié","propre","démontage propre","origine"],
+};
+
+/** Mots-clés d'analyse sémantique — véhicules complets */
+const MOTS_VOITURE = {
+  alerte:   ["accidenté","choc","rouille","fuite","fumée","cliquetis","ct refusé","ct négatif",
+             "griffe","fissure","panne","voyant","embrayage à changer","boîte difficile"],
+  positifs: ["révisé","ct ok","ct valide","courroie refaite","entretien suivi","carnet",
+             "non fumeur","première main","impeccable","très bon état","kilométrage certifié"],
+};
+
+/** Données de marché historiques (structure dynamique) */
+const HISTORIQUE_BASE = [
+  { periode: "Oct", volume: 38, avg_prix: 390,  avg_marge: 420, nb_bonnes: 4  },
+  { periode: "Nov", volume: 42, avg_prix: 410,  avg_marge: 380, nb_bonnes: 5  },
+  { periode: "Déc", volume: 29, avg_prix: 370,  avg_marge: 450, nb_bonnes: 3  },
+  { periode: "Jan", volume: 51, avg_prix: 340,  avg_marge: 510, nb_bonnes: 8  },
+  { periode: "Fév", volume: 44, avg_prix: 360,  avg_marge: 490, nb_bonnes: 6  },
+  { periode: "Mar", volume: 58, avg_prix: 320,  avg_marge: 560, nb_bonnes: 9  },
+];
+
+/** Catégories universelles (découplage Clio 3) */
+const CATEGORIES = [
+  { id: "moteur",   label: "Moteur",          icon: Wrench  },
+  { id: "boite",    label: "Boîte de vitesses", icon: Settings },
+  { id: "vehicule", label: "Véhicule complet",  icon: Car     },
+  { id: "piece",    label: "Pièce diverse",     icon: Package },
+];
+
+/** Statuts pipeline */
+const PIPELINE_STATUTS = [
+  { id: "prospect",  label: "Prospect",       color: "#6366F1", bg: "rgba(99,102,241,0.08)"  },
+  { id: "offre",     label: "Offre envoyée",  color: "#F59E0B", bg: "rgba(245,158,11,0.08)"  },
+  { id: "stock",     label: "En stock",       color: "#3B82F6", bg: "rgba(59,130,246,0.08)"  },
+  { id: "en_vente",  label: "En vente",       color: "#8B5CF6", bg: "rgba(139,92,246,0.08)"  },
+  { id: "vendu",     label: "Vendu",          color: "#10B981", bg: "rgba(16,185,129,0.08)"  },
+];
+
+/** Sources de données */
+const SOURCES = [
+  { id: "leboncoin",  label: "Leboncoin",    color: "#F97316" },
+  { id: "ebay",       label: "eBay",         color: "#EF4444" },
+  { id: "lacentrale", label: "La Centrale",  color: "#3B82F6" },
+  { id: "facebook",   label: "Facebook MP",  color: "#2563EB" },
+  { id: "scraper",    label: "Auto-import",  color: "#10B981" },
+  { id: "manuel",     label: "Manuel",       color: "#6B7280" },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 2 — HOOK useValuation (service de scoring)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Service de valorisation unifié.
+ * Remplace les fonctions scorerMoteur / scorerVoiture de la v6.
+ * Désormais universel : fonctionne pour tout véhicule ou pièce.
+ */
+function useValuation() {
+
+  const _detectKeywords = (description, mots) => {
+    const d = (description || "").toLowerCase();
+    return {
+      alertes:  [...new Set(mots.alerte.filter(m => d.includes(m)))],
+      positifs: [...new Set(mots.positifs.filter(m => d.includes(m)))],
+    };
+  };
+
+  const _getVerdict = (score) => {
+    if (score >= 80) return { label: "EXCELLENT",  tier: 4, color: "#10B981", accent: "emerald" };
+    if (score >= 60) return { label: "ACCEPTABLE", tier: 3, color: "#F59E0B", accent: "amber"   };
+    if (score >= 40) return { label: "RISQUÉ",     tier: 2, color: "#EF4444", accent: "red"     };
+    return              { label: "ÉVITER",         tier: 1, color: "#7F1D1D", accent: "red"     };
+  };
+
+  /**
+   * Calcule la rentabilité complète avec TVA sur marge, MO, logistique
+   * @param {object} params
+   */
+  const calculerRentabilite = useCallback(({
+    prixAchat, coutReparation = 0, prixRevente,
+    distanceKm = 0, tauxKm = 0.35,
+    mainOeuvre = 0, tvaActive = false,
+    fraisDivers = 50,
+  }) => {
+    const fraisLogistique = distanceKm * tauxKm;
+    const coutBrut = prixAchat + coutReparation + mainOeuvre + fraisLogistique + fraisDivers;
+    const margeAvantTVA = prixRevente - coutBrut;
+    // TVA sur marge (régime de la marge, Art. 297A CGI)
+    const tva = tvaActive ? margeAvantTVA * 0.1667 : 0; // 20/120
+    const margeNette = margeAvantTVA - tva;
+    const roi = coutBrut > 0 ? Math.round((margeNette / coutBrut) * 100) : 0;
+    return {
+      fraisLogistique: Math.round(fraisLogistique),
+      coutTotal: Math.round(coutBrut),
+      margeAvantTVA: Math.round(margeAvantTVA),
+      tva: Math.round(tva),
+      margeNette: Math.round(margeNette),
+      roi,
+    };
+  }, []);
+
+  /**
+   * Scorer universel — adapte les seuils selon la catégorie et les paramètres utilisateur
+   */
+  const scorer = useCallback((annonce, refMarche) => {
+    const {
+      prix, km, annee, description, defauts = [],
+      vendeur, categorie, prixRevente
+    } = annonce;
+
+    const ref = refMarche || {};
+    let score = 100;
+    const alertes = [], positifs = [], details = [];
+
+    const pr = parseFloat(prix) || 0;
+    const k  = parseInt(km) || 0;
+    const an = parseInt(annee) || 0;
+
+    // ── PRIX (paramétrique selon catégorie) ──
+    const P = ref.prix || {};
+    if (P.super !== undefined) {
+      if      (pr < P.super)   { alertes.push(`Prix anormalement bas (${pr.toLocaleString("fr")} €)`); score -= 8; }
+      else if (pr <= P.bon)    { positifs.push(`Prix exceptionnel (${pr.toLocaleString("fr")} €)`); score += 18; }
+      else if (pr <= P.correct){ positifs.push(`Bon positionnement marché`); score += 8; }
+      else if (pr <= P.cher)   { details.push(`Prix fourchette haute`); score -= 8; }
+      else if (pr <= P.max)    { alertes.push(`Prix élevé — négociation nécessaire`); score -= 18; }
+      else                     { alertes.push(`Hors budget cible`); score -= 35; }
+    }
+
+    // ── KILOMÉTRAGE ──
+    const K = ref.km || {};
+    if (K.top !== undefined) {
+      if      (k <= 0)         { details.push("Kilométrage non communiqué"); score -= 8; }
+      else if (k <= K.top)     { positifs.push(`Kilométrage excellent (${k.toLocaleString("fr")} km)`); score += 18; }
+      else if (k <= K.bon)     { positifs.push(`Kilométrage correct (${k.toLocaleString("fr")} km)`); score += 8; }
+      else if (k <= K.ok)      { details.push(`Kilométrage moyen (${k.toLocaleString("fr")} km)`); score -= 8; }
+      else if (k <= K.limite)  { alertes.push(`Kilométrage élevé (${k.toLocaleString("fr")} km)`); score -= 18; }
+      else                     { alertes.push(`Kilométrage excessif`); score -= 30; }
+    }
+
+    // ── ANNÉE ──
+    if (ref.anneeMin && ref.anneeMax && an > 0) {
+      if (an >= ref.anneeMin && an <= ref.anneeMax) {
+        positifs.push(`Millésime ${an} — dans la cible`); score += 5;
+      } else {
+        alertes.push(`Millésime hors cible (${an})`); score -= 10;
+      }
+    }
+
+    // ── DÉFAUTS COCHÉS ──
+    let coutReparation = 0;
+    defauts.forEach(key => {
+      const df = DEFAUTS[key]; if (!df) return;
+      coutReparation += df.cout;
+      if (df.risque === "critical")     { alertes.push(`Défaut critique : ${df.label} (~${df.cout} €)`); score -= 22; }
+      else if (df.risque === "high")    { alertes.push(`Défaut majeur : ${df.label} (~${df.cout} €)`);    score -= 14; }
+      else if (df.risque === "medium")  { details.push(`Défaut modéré : ${df.label} (~${df.cout} €)`);   score -= 8;  }
+      else                              { details.push(`Défaut mineur : ${df.label} (~${df.cout} €)`);   score -= 4;  }
+    });
+
+    // ── VENDEUR ──
+    if (vendeur === "pro") { details.push("Professionnel — prix peu négociable, garanties possibles"); }
+    else { positifs.push("Particulier — marge de négociation disponible"); }
+
+    // ── ANALYSE SÉMANTIQUE ──
+    const mots = (categorie === "vehicule") ? MOTS_VOITURE : MOTS_MOTEUR;
+    const { alertes: ma, positifs: mp } = _detectKeywords(description, mots);
+    ma.forEach(m => { alertes.push(`Signal négatif : "${m}"`); score -= 7; });
+    mp.forEach(m => { positifs.push(`Signal positif : "${m}"`); score += 4; });
+
+    const sc = Math.max(0, Math.min(100, score));
+    const verdict = _getVerdict(sc);
+
+    // ── RENTABILITÉ ──
+    const prixReventeEst = parseFloat(prixRevente || ref.revente || 0);
+    const rent = prixReventeEst > 0 ? calculerRentabilite({
+      prixAchat: pr,
+      coutReparation,
+      prixRevente: prixReventeEst,
+    }) : null;
+
+    return {
+      score: sc,
+      verdict,
+      alertes,
+      positifs,
+      details,
+      coutReparation,
+      rentabilite: rent,
+    };
+  }, [calculerRentabilite]);
+
+  return { scorer, calculerRentabilite };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 3 — VALIDATEUR (Zod-like inline)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function validerAnnonce(data) {
+  const errors = {};
+  if (!data.titre?.trim()) errors.titre = "Titre obligatoire";
+  if (!data.prix || isNaN(parseFloat(data.prix)) || parseFloat(data.prix) < 0)
+    errors.prix = "Prix invalide";
+  if (!data.categorie) errors.categorie = "Catégorie requise";
+  if (data.km && isNaN(parseInt(data.km))) errors.km = "Kilométrage invalide";
+  if (data.annee && (parseInt(data.annee) < 1900 || parseInt(data.annee) > new Date().getFullYear() + 1))
+    errors.annee = "Année invalide";
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 4 — SIMULATEUR SCRAPER (connecteur backend)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * fetchScraper — connecteur prêt pour un backend de scraping réel.
+ * En prod : remplacer par fetch(`${API_BASE}/scrape?query=${query}`)
+ */
+async function fetchScraper(query, categorie = "vehicule") {
+  await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
+  const marques = ["Renault", "Peugeot", "Citroën", "Volkswagen", "Ford", "Toyota"];
+  const modeles = { vehicule: ["Clio", "208", "C3", "Golf", "Focus", "Yaris"], moteur: ["K4M 1.6", "EB2 1.2", "DV6 1.6 HDi", "EA211 1.0", "EcoBoost 1.0", "1NZ-FE"] };
+  const sources = ["leboncoin", "ebay", "lacentrale", "facebook"];
+  return Array.from({ length: 6 + Math.floor(Math.random() * 4) }, (_, i) => {
+    const marque = marques[Math.floor(Math.random() * marques.length)];
+    const modele = (modeles[categorie] || modeles.vehicule)[Math.floor(Math.random() * 5)];
+    const prixBase = categorie === "vehicule" ? 1800 + Math.random() * 4000 : 200 + Math.random() * 900;
+    return {
+      id: Date.now() + i,
+      titre: `${marque} ${modele} — ${2005 + Math.floor(Math.random() * 12)}`,
+      prix: Math.round(prixBase),
+      km: Math.round(60000 + Math.random() * 200000),
+      annee: 2005 + Math.floor(Math.random() * 12),
+      description: ["bon état général, révisé récemment, ct ok valide", "vendu en l'état, non testé, cliquetis moteur", "très bon état, carnet complet, courroie refaite", "quelques rayures, embrayage à changer, ct négatif"][Math.floor(Math.random() * 4)],
+      vendeur: Math.random() > 0.4 ? "particulier" : "pro",
+      source: "scraper",
+      categorie,
+      statut: "prospect",
+    };
+  });
+}
+
+/** Parser d'import texte brut / URL */
+function parseImportTexte(texte) {
+  const prix = texte.match(/(\d[\d\s]*)\s*€/)?.[1]?.replace(/\s/g, "");
+  const km = texte.match(/(\d[\d\s]*)\s*km/)?.[1]?.replace(/\s/g, "");
+  const annee = texte.match(/\b(19|20)\d{2}\b/)?.[0];
+  const titre = texte.split("\n")[0]?.trim().slice(0, 80) || "Import texte";
+  const url = texte.match(/https?:\/\/[^\s]+/)?.[0];
+  return { titre, prix: prix || "", km: km || "", annee: annee || "", description: texte, url, source: "manuel", categorie: "vehicule", statut: "prospect" };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 5 — UTILITAIRES
+// ─────────────────────────────────────────────────────────────────────────────
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function exportCSV(data) {
+  const header = ["ID","Titre","Catégorie","Prix (€)","Km","Année","Score","Verdict","Statut","Source","Cout Total (€)","Marge Nette (€)","ROI (%)","Nb Alertes"];
+  const rows = data.map((r, i) => [
+    i + 1,
+    `"${(r.titre || "").replace(/"/g, "'")}"`,
+    r.categorie, r.prix, r.km || "", r.annee || "",
+    r.score || "", r.verdict?.label || "",
+    r.statut || "", r.source || "",
+    r.rentabilite?.coutTotal || "", r.rentabilite?.margeNette || "",
+    r.rentabilite?.roi || "", r.alertes?.length || "",
+  ]);
+  const csv = [header, ...rows].map(l => l.join(";")).join("\r\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `sk-autoflip-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function fmt(n, suffix = "") {
+  if (n === null || n === undefined || n === "") return "—";
+  const v = parseFloat(n);
+  if (isNaN(v)) return "—";
+  return v.toLocaleString("fr-FR") + suffix;
+}
+
+function fmtPct(n) {
+  if (n === null || n === undefined) return "—";
+  return (n >= 0 ? "+" : "") + n + " %";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 6 — COMPOSANTS UI SYSTÈME
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Badge de statut pipeline */
+function StatusBadge({ statut }) {
+  const s = PIPELINE_STATUTS.find(x => x.id === statut) || PIPELINE_STATUTS[0];
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px",
+      borderRadius: 4, fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
+      background: s.bg, color: s.color, border: `1px solid ${s.color}33`,
+      fontFamily: "'IBM Plex Mono', monospace", textTransform: "uppercase",
+    }}>{s.label}</span>
+  );
+}
+
+/** Badge de score numérique */
+function ScoreCell({ score, verdict }) {
+  if (!verdict) return <span style={{ color: "#4B5563", fontSize: 12 }}>—</span>;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ width: 36, height: 6, background: "#1E293B", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ width: `${score}%`, height: "100%", background: verdict.color, borderRadius: 3,
+          transition: "width 0.4s ease" }} />
+      </div>
+      <span style={{ fontSize: 12, fontWeight: 700, color: verdict.color, fontFamily: "'IBM Plex Mono', monospace",
+        minWidth: 28, textAlign: "right" }}>{score}</span>
+    </div>
+  );
+}
+
+/** Indicateur delta (hausse/baisse) */
+function Delta({ value, suffix = "" }) {
+  if (value === null || value === undefined) return <span style={{ color: "#4B5563" }}>—</span>;
+  const pos = value >= 0;
+  const Icon = pos ? ArrowUpRight : ArrowDownRight;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: 12,
+      color: pos ? "#10B981" : "#EF4444", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>
+      <Icon size={12} />
+      {pos ? "+" : ""}{fmt(value)}{suffix}
+    </span>
+  );
+}
+
+/** KPI card */
+function KpiCard({ label, value, sub, delta, icon: Icon, accent = "#6366F1" }) {
+  return (
+    <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8,
+      padding: "16px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, color: "#4B5563", letterSpacing: 1.5, textTransform: "uppercase",
+          fontFamily: "'IBM Plex Mono', monospace" }}>{label}</span>
+        {Icon && <Icon size={14} color={accent} />}
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: "#F1F5F9", fontFamily: "'IBM Plex Mono', monospace",
+        letterSpacing: -0.5 }}>{value}</div>
+      {(sub || delta !== undefined) && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          {sub && <span style={{ fontSize: 10, color: "#374151" }}>{sub}</span>}
+          {delta !== undefined && <Delta value={delta} suffix=" %" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Séparateur de section */
+function SectionHeader({ title, sub, action }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between",
+      marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid #1E293B" }}>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#F1F5F9", letterSpacing: 1,
+          textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace" }}>{title}</div>
+        {sub && <div style={{ fontSize: 10, color: "#4B5563", marginTop: 2 }}>{sub}</div>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+/** Bouton primaire */
+function Btn({ children, onClick, variant = "primary", size = "md", disabled, icon: Icon, style: extStyle }) {
+  const sizes = { sm: { padding: "5px 10px", fontSize: 11 }, md: { padding: "8px 14px", fontSize: 12 }, lg: { padding: "10px 18px", fontSize: 13 } };
+  const variants = {
+    primary:  { background: "#6366F1", color: "#fff", border: "1px solid #6366F1"   },
+    secondary:{ background: "transparent", color: "#94A3B8", border: "1px solid #1E293B" },
+    danger:   { background: "transparent", color: "#EF4444", border: "1px solid #EF4444" },
+    success:  { background: "#10B981", color: "#fff", border: "1px solid #10B981"   },
+    ghost:    { background: "transparent", color: "#4B5563", border: "1px solid transparent" },
+  };
+  return (
+    <button onClick={onClick} disabled={disabled}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 5, fontWeight: 600,
+        cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1, transition: "all .15s",
+        letterSpacing: 0.3, fontFamily: "'IBM Plex Mono', monospace",
+        ...sizes[size], ...variants[variant], ...extStyle }}>
+      {Icon && <Icon size={size === "sm" ? 12 : 13} />}
+      {children}
+    </button>
+  );
+}
+
+/** Tag de source */
+function SourceTag({ sourceId }) {
+  const s = SOURCES.find(x => x.id === sourceId) || SOURCES[5];
+  return (
+    <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace",
+      background: s.color + "18", color: s.color, border: `1px solid ${s.color}33`,
+      letterSpacing: 0.5, textTransform: "uppercase" }}>{s.label}</span>
+  );
+}
+
+/** Tooltip personnalisé recharts */
+function ChartTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 6,
+      padding: "8px 12px", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}>
+      <div style={{ color: "#94A3B8", marginBottom: 4 }}>{label}</div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.color, display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: p.color, display: "inline-block" }} />
+          <span style={{ color: "#94A3B8" }}>{p.name}</span>
+          <span style={{ fontWeight: 700 }}>{fmt(p.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 7 — DATATABLE (tableau haute densité avec tri)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DataTable({ data, onView, onDelete, onStatusChange, onToggleWatch, watchlist }) {
+  const [sortCol, setSortCol]  = useState("score");
+  const [sortDir, setSortDir]  = useState("desc");
+  const [filter, setFilter]    = useState("");
+  const [selCat, setSelCat]    = useState("tous");
+  const [selStatut, setSelStatut] = useState("tous");
+  const [page, setPage]        = useState(1);
+  const PER_PAGE = 15;
+
+  const sort = (col) => {
+    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("desc"); }
+    setPage(1);
+  };
+
+  const filtered = useMemo(() => {
+    let d = [...data];
+    if (filter) {
+      const q = filter.toLowerCase();
+      d = d.filter(r => (r.titre || "").toLowerCase().includes(q) || (r.source || "").includes(q));
+    }
+    if (selCat !== "tous")    d = d.filter(r => r.categorie === selCat);
+    if (selStatut !== "tous") d = d.filter(r => r.statut === selStatut);
+    d.sort((a, b) => {
+      let va = a[sortCol], vb = b[sortCol];
+      if (sortCol === "score")       { va = a.score || 0; vb = b.score || 0; }
+      if (sortCol === "margeNette")  { va = a.rentabilite?.margeNette || -Infinity; vb = b.rentabilite?.margeNette || -Infinity; }
+      if (sortCol === "roi")         { va = a.rentabilite?.roi || -Infinity; vb = b.rentabilite?.roi || -Infinity; }
+      if (sortCol === "prix")        { va = parseFloat(a.prix) || 0; vb = parseFloat(b.prix) || 0; }
+      if (typeof va === "string") va = va.toLowerCase();
+      if (typeof vb === "string") vb = vb.toLowerCase();
+      return sortDir === "asc" ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+    });
+    return d;
+  }, [data, filter, selCat, selStatut, sortCol, sortDir]);
+
+  const paginated = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE);
+  const totalPages = Math.ceil(filtered.length / PER_PAGE);
+
+  const ColHeader = ({ col, label, right }) => {
+    const active = sortCol === col;
+    const Icon = active ? (sortDir === "asc" ? ChevronUp : ChevronDown) : ChevronsUpDown;
+    return (
+      <th onClick={() => sort(col)}
+        style={{ padding: "8px 12px", textAlign: right ? "right" : "left", cursor: "pointer",
+          fontSize: 9, letterSpacing: 1.5, fontWeight: 600, textTransform: "uppercase", userSelect: "none",
+          color: active ? "#6366F1" : "#4B5563", fontFamily: "'IBM Plex Mono', monospace",
+          borderBottom: "1px solid #1E293B", whiteSpace: "nowrap", background: "#060F1E" }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          {label} <Icon size={10} />
+        </span>
+      </th>
+    );
+  };
+
+  return (
+    <div>
+      {/* Filtres */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 180 }}>
+          <Search size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "#4B5563" }} />
+          <input value={filter} onChange={e => { setFilter(e.target.value); setPage(1); }}
+            placeholder="Rechercher..."
+            style={{ width: "100%", background: "#0F172A", border: "1px solid #1E293B", color: "#F1F5F9",
+              padding: "6px 10px 6px 28px", borderRadius: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace",
+              outline: "none" }} />
+        </div>
+        <select value={selCat} onChange={e => { setSelCat(e.target.value); setPage(1); }}
+          style={{ background: "#0F172A", border: "1px solid #1E293B", color: "#94A3B8",
+            padding: "6px 10px", borderRadius: 5, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }}>
+          <option value="tous">Toutes catégories</option>
+          {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
+        <select value={selStatut} onChange={e => { setSelStatut(e.target.value); setPage(1); }}
+          style={{ background: "#0F172A", border: "1px solid #1E293B", color: "#94A3B8",
+            padding: "6px 10px", borderRadius: 5, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }}>
+          <option value="tous">Tous statuts</option>
+          {PIPELINE_STATUTS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+        <span style={{ fontSize: 10, color: "#374151", fontFamily: "'IBM Plex Mono', monospace", marginLeft: 4 }}>
+          {filtered.length} résultat{filtered.length > 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {/* Tableau */}
+      <div style={{ overflowX: "auto", border: "1px solid #1E293B", borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr>
+              <ColHeader col="titre"    label="Désignation" />
+              <ColHeader col="categorie" label="Catégorie" />
+              <ColHeader col="prix"     label="Prix achat" right />
+              <ColHeader col="score"    label="Score" right />
+              <ColHeader col="margeNette" label="Marge nette" right />
+              <ColHeader col="roi"      label="ROI" right />
+              <th style={{ padding: "8px 12px", fontSize: 9, letterSpacing: 1.5, fontWeight: 600,
+                textTransform: "uppercase", color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace",
+                borderBottom: "1px solid #1E293B", background: "#060F1E" }}>Statut</th>
+              <th style={{ padding: "8px 12px", fontSize: 9, letterSpacing: 1.5, fontWeight: 600,
+                textTransform: "uppercase", color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace",
+                borderBottom: "1px solid #1E293B", background: "#060F1E" }}>Source</th>
+              <th style={{ padding: "8px 12px", background: "#060F1E", borderBottom: "1px solid #1E293B" }} />
+            </tr>
+          </thead>
+          <tbody>
+            {paginated.length === 0 ? (
+              <tr><td colSpan={9} style={{ textAlign: "center", padding: "40px", color: "#374151",
+                fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                Aucune donnée — importez ou ajoutez des annonces
+              </td></tr>
+            ) : paginated.map((r, i) => (
+              <tr key={r.id}
+                style={{ borderBottom: "1px solid #0F172A",
+                  background: i % 2 === 0 ? "#0A1628" : "#0F172A",
+                  transition: "background .1s" }}
+                onMouseEnter={e => e.currentTarget.style.background = "#162032"}
+                onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? "#0A1628" : "#0F172A"}>
+                <td style={{ padding: "10px 12px", maxWidth: 200 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button onClick={() => onToggleWatch(r.id)}
+                      style={{ background: "none", border: "none", cursor: "pointer", padding: 0, flexShrink: 0,
+                        color: watchlist.includes(r.id) ? "#F59E0B" : "#1E293B", transition: "color .15s" }}>
+                      <Star size={12} fill={watchlist.includes(r.id) ? "#F59E0B" : "none"} />
+                    </button>
+                    <span style={{ color: "#D1D5DB", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis",
+                      whiteSpace: "nowrap", maxWidth: 170 }}>{r.titre || "—"}</span>
+                  </div>
+                  {r.url && (
+                    <a href={r.url} target="_blank" rel="noopener noreferrer"
+                      style={{ fontSize: 9, color: "#374151", display: "flex", alignItems: "center", gap: 2,
+                        marginTop: 2, textDecoration: "none" }}>
+                      <ExternalLink size={9} /> Source
+                    </a>
+                  )}
+                </td>
+                <td style={{ padding: "10px 12px" }}>
+                  <span style={{ fontSize: 10, color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace" }}>
+                    {CATEGORIES.find(c => c.id === r.categorie)?.label || r.categorie || "—"}
+                  </span>
+                </td>
+                <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace",
+                  fontWeight: 600, color: "#94A3B8" }}>{fmt(r.prix, " €")}</td>
+                <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                  <ScoreCell score={r.score} verdict={r.verdict} />
+                </td>
+                <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                  {r.rentabilite ? (
+                    <Delta value={r.rentabilite.margeNette} suffix=" €" />
+                  ) : <span style={{ color: "#374151", fontSize: 11 }}>N/A</span>}
+                </td>
+                <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                  {r.rentabilite ? (
+                    <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace",
+                      color: r.rentabilite.roi >= 0 ? "#10B981" : "#EF4444", fontWeight: 700 }}>
+                      {fmtPct(r.rentabilite.roi)}
+                    </span>
+                  ) : <span style={{ color: "#374151", fontSize: 11 }}>—</span>}
+                </td>
+                <td style={{ padding: "10px 12px" }}>
+                  <select value={r.statut || "prospect"} onChange={e => onStatusChange(r.id, e.target.value)}
+                    style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 10,
+                      fontFamily: "'IBM Plex Mono', monospace", outline: "none" }}>
+                    {PIPELINE_STATUTS.map(s => <option key={s.id} value={s.id} style={{ background: "#0F172A" }}>{s.label}</option>)}
+                  </select>
+                </td>
+                <td style={{ padding: "10px 12px" }}>
+                  <SourceTag sourceId={r.source} />
+                </td>
+                <td style={{ padding: "10px 12px" }}>
+                  <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                    <button onClick={() => onView(r)} title="Voir détails"
+                      style={{ background: "none", border: "none", cursor: "pointer", color: "#374151",
+                        padding: 4, borderRadius: 4, transition: "color .15s" }}
+                      onMouseEnter={e => e.target.style.color = "#6366F1"}
+                      onMouseLeave={e => e.target.style.color = "#374151"}>
+                      <Eye size={13} />
+                    </button>
+                    <button onClick={() => onDelete(r.id)} title="Supprimer"
+                      style={{ background: "none", border: "none", cursor: "pointer", color: "#374151",
+                        padding: 4, borderRadius: 4, transition: "color .15s" }}
+                      onMouseEnter={e => e.target.style.color = "#EF4444"}
+                      onMouseLeave={e => e.target.style.color = "#374151"}>
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+          marginTop: 10, fontSize: 11, color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace" }}>
+          <span>Page {page} / {totalPages}</span>
+          <div style={{ display: "flex", gap: 4 }}>
+            <Btn size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>Préc.</Btn>
+            <Btn size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>Suiv.</Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 8 — MODAL DÉTAIL ANNONCE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ModalDetail({ annonce, onClose, onStatusChange }) {
+  if (!annonce) return null;
+  const r = annonce;
+  const rent = r.rentabilite;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(2,8,23,0.85)", zIndex: 1000,
+      display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "24px 16px",
+      overflowY: "auto" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "#060F1E", border: "1px solid #1E293B", borderRadius: 10, width: "100%",
+          maxWidth: 620, padding: 24 }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#F1F5F9", marginBottom: 4 }}>{r.titre}</div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <SourceTag sourceId={r.source} />
+              <StatusBadge statut={r.statut} />
+              {r.categorie && (
+                <span style={{ fontSize: 9, color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace",
+                  textTransform: "uppercase", letterSpacing: 1 }}>
+                  {CATEGORIES.find(c => c.id === r.categorie)?.label}
+                </span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer",
+            color: "#4B5563", padding: 4 }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Score principal */}
+        {r.verdict && (
+          <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "14px 16px",
+            background: "#0A1628", borderRadius: 8, marginBottom: 16, border: `1px solid ${r.verdict.color}22` }}>
+            <div>
+              <div style={{ fontSize: 9, color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace",
+                textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 2 }}>Score de valorisation</div>
+              <div style={{ fontSize: 32, fontWeight: 900, color: r.verdict.color, fontFamily: "'IBM Plex Mono', monospace",
+                lineHeight: 1 }}>{r.score}<span style={{ fontSize: 14, opacity: 0.5 }}>/100</span></div>
+            </div>
+            <div style={{ width: 1, height: 40, background: "#1E293B" }} />
+            <div>
+              <div style={{ fontSize: 9, color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace",
+                textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 2 }}>Verdict</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: r.verdict.color, letterSpacing: 1 }}>
+                {r.verdict.label}
+              </div>
+            </div>
+            <div style={{ marginLeft: "auto" }}>
+              <select value={r.statut || "prospect"} onChange={e => onStatusChange(r.id, e.target.value)}
+                style={{ background: "#0F172A", border: "1px solid #1E293B", color: "#94A3B8",
+                  padding: "6px 10px", borderRadius: 5, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace",
+                  cursor: "pointer" }}>
+                {PIPELINE_STATUTS.map(s => <option key={s.id} value={s.id} style={{ background: "#0F172A" }}>{s.label}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* Infos clés */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 16 }}>
+          {[
+            { label: "Prix achat", value: fmt(r.prix, " €") },
+            { label: "Kilométrage", value: fmt(r.km, " km") },
+            { label: "Millésime", value: r.annee || "—" },
+            { label: "Vendeur", value: r.vendeur === "pro" ? "Professionnel" : "Particulier" },
+          ].map(({ label, value }) => (
+            <div key={label} style={{ background: "#0A1628", borderRadius: 6, padding: "10px 12px" }}>
+              <div style={{ fontSize: 9, color: "#374151", fontFamily: "'IBM Plex Mono', monospace",
+                textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>{label}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#94A3B8", fontFamily: "'IBM Plex Mono', monospace" }}>{value}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Rentabilité */}
+        {rent && (
+          <div style={{ marginBottom: 16 }}>
+            <SectionHeader title="Analyse de rentabilité" />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 1,
+              background: "#1E293B", borderRadius: 6, overflow: "hidden" }}>
+              {[
+                { label: "Coût total", value: fmt(rent.coutTotal, " €"), color: "#F59E0B" },
+                { label: "Coût réparations", value: fmt(r.coutReparation, " €"), color: "#94A3B8" },
+                { label: "Frais logistique", value: fmt(rent.fraisLogistique, " €"), color: "#94A3B8" },
+                { label: "Prix revente est.", value: fmt(r.prixRevente || "—", " €"), color: "#60A5FA" },
+                { label: "Marge nette", value: <Delta value={rent.margeNette} suffix=" €" />, color: null },
+                { label: "ROI", value: <Delta value={rent.roi} suffix=" %" />, color: null },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ background: "#0A1628", padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "#374151", fontFamily: "'IBM Plex Mono', monospace",
+                    textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>{label}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: color || "inherit",
+                    fontFamily: "'IBM Plex Mono', monospace" }}>{value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Diagnostics */}
+        {(r.alertes?.length > 0 || r.positifs?.length > 0) && (
+          <div>
+            <SectionHeader title="Diagnostics" />
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {r.alertes?.map((a, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, padding: "6px 10px", fontSize: 11,
+                  background: "rgba(239,68,68,0.06)", borderLeft: "2px solid #EF4444",
+                  borderRadius: "0 4px 4px 0", color: "#FCA5A5" }}>
+                  <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 1 }} />{a}
+                </div>
+              ))}
+              {r.positifs?.map((p, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, padding: "6px 10px", fontSize: 11,
+                  background: "rgba(16,185,129,0.05)", borderLeft: "2px solid #10B981",
+                  borderRadius: "0 4px 4px 0", color: "#6EE7B7" }}>
+                  <CheckCircle size={11} style={{ flexShrink: 0, marginTop: 1 }} />{p}
+                </div>
+              ))}
+              {r.details?.map((d, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, padding: "6px 10px", fontSize: 11,
+                  background: "rgba(245,158,11,0.05)", borderLeft: "2px solid #F59E0B",
+                  borderRadius: "0 4px 4px 0", color: "#FDE68A" }}>
+                  <Info size={11} style={{ flexShrink: 0, marginTop: 1 }} />{d}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {r.description && (
+          <div style={{ marginTop: 16 }}>
+            <SectionHeader title="Description brute" />
+            <div style={{ background: "#0A1628", borderRadius: 6, padding: "10px 12px", fontSize: 11,
+              color: "#4B5563", lineHeight: 1.7, fontFamily: "'IBM Plex Mono', monospace",
+              maxHeight: 120, overflowY: "auto" }}>{r.description}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 9 — FORMULAIRE D'AJOUT UNIVERSEL
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FORM_INIT = {
+  titre: "", categorie: "vehicule", prix: "", prixRevente: "",
+  km: "", annee: "", vendeur: "particulier", source: "leboncoin",
+  description: "", defauts: [], statut: "prospect",
+  // Champs de référence marché (configurables)
+  refPrixSuper: "", refPrixMax: "", refRevente: "",
+  refKmTop: "", refKmLimite: "",
+  refAnneeMin: "", refAnneeMax: "",
+  // Frais avancés
+  distanceKm: "0", mainOeuvre: "0", tvaActive: false,
+};
+
+function FormulaireAjout({ onAdd, onClose }) {
+  const [f, setF] = useState(FORM_INIT);
+  const [errors, setErrors] = useState({});
+  const [tab, setTab] = useState("base"); // base | marche | frais
+
+  const ch = (name, val) => setF(p => ({ ...p, [name]: val }));
+  const chE = e => ch(e.target.name, e.target.type === "checkbox" ? e.target.checked : e.target.value);
+  const toggleDefaut = key => ch("defauts", f.defauts.includes(key)
+    ? f.defauts.filter(k => k !== key)
+    : [...f.defauts, key]);
+
+  const submit = () => {
+    const { valid, errors: err } = validerAnnonce(f);
+    if (!valid) { setErrors(err); return; }
+    onAdd({ ...f, id: Date.now(), ts: new Date().toISOString() });
+    onClose();
+  };
+
+  const Field = ({ label, name, type = "text", placeholder, hint }) => (
+    <div>
+      <label style={{ display: "block", fontSize: 9, color: errors[name] ? "#EF4444" : "#4B5563",
+        letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace",
+        marginBottom: 4 }}>{label}{errors[name] ? ` — ${errors[name]}` : ""}</label>
+      <input type={type} name={name} value={f[name]} onChange={chE} placeholder={placeholder}
+        style={{ width: "100%", background: "#0A1628", border: `1px solid ${errors[name] ? "#EF4444" : "#1E293B"}`,
+          color: "#F1F5F9", padding: "7px 10px", borderRadius: 5, fontSize: 12,
+          fontFamily: "'IBM Plex Mono', monospace", outline: "none" }}
+        onFocus={e => e.target.style.borderColor = "#6366F1"}
+        onBlur={e => e.target.style.borderColor = errors[name] ? "#EF4444" : "#1E293B"} />
+      {hint && <p style={{ fontSize: 9, color: "#374151", marginTop: 2, fontFamily: "'IBM Plex Mono', monospace" }}>{hint}</p>}
+    </div>
+  );
+
+  const Sel = ({ label, name, options }) => (
+    <div>
+      <label style={{ display: "block", fontSize: 9, color: "#4B5563", letterSpacing: 1.5,
+        textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>{label}</label>
+      <select name={name} value={f[name]} onChange={chE}
+        style={{ width: "100%", background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9",
+          padding: "7px 10px", borderRadius: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace",
+          cursor: "pointer", outline: "none" }}>
+        {options.map(o => <option key={o.value} value={o.value} style={{ background: "#0A1628" }}>{o.label}</option>)}
+      </select>
+    </div>
+  );
+
+  const tabs = [
+    { id: "base",   label: "Informations" },
+    { id: "marche", label: "Référentiels marché" },
+    { id: "frais",  label: "Frais avancés" },
+  ];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(2,8,23,0.9)", zIndex: 1000,
+      display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "20px 16px", overflowY: "auto" }}
+      onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "#060F1E", border: "1px solid #1E293B", borderRadius: 10,
+          width: "100%", maxWidth: 600, padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 13,
+            color: "#F1F5F9", letterSpacing: 0.5, textTransform: "uppercase" }}>Nouvelle opportunité</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#4B5563" }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 0, marginBottom: 18, border: "1px solid #1E293B", borderRadius: 6, overflow: "hidden" }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              style={{ flex: 1, padding: "7px 10px", fontSize: 10, fontFamily: "'IBM Plex Mono', monospace",
+                textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, border: "none", cursor: "pointer",
+                background: tab === t.id ? "#6366F1" : "transparent", color: tab === t.id ? "#fff" : "#4B5563",
+                transition: "all .15s" }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* Onglet 1 — Informations de base */}
+        {tab === "base" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Field label="Désignation *" name="titre" placeholder="Ex: Renault Clio III 1.6 16V — 2007" />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Sel label="Catégorie *" name="categorie" options={CATEGORIES.map(c => ({ value: c.id, label: c.label }))} />
+              <Sel label="Statut pipeline" name="statut" options={PIPELINE_STATUTS.map(s => ({ value: s.id, label: s.label }))} />
+              <Field label="Prix achat (€) *" name="prix" type="number" placeholder="2500" />
+              <Field label="Prix revente estimé (€)" name="prixRevente" type="number" placeholder="3800" />
+              <Field label="Kilométrage" name="km" type="number" placeholder="130000" />
+              <Field label="Millésime" name="annee" type="number" placeholder="2007" />
+              <Sel label="Type de vendeur" name="vendeur" options={[
+                { value: "particulier", label: "Particulier" },
+                { value: "pro", label: "Professionnel / Garage" },
+              ]} />
+              <Sel label="Source" name="source" options={SOURCES.map(s => ({ value: s.id, label: s.label }))} />
+            </div>
+            {/* Description */}
+            <div>
+              <label style={{ display: "block", fontSize: 9, color: "#4B5563", letterSpacing: 1.5,
+                textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>Description annonce</label>
+              <textarea name="description" value={f.description} onChange={chE}
+                rows={3} placeholder="Copiez-collez la description de l'annonce ici — l'analyse sémantique se fait automatiquement"
+                style={{ width: "100%", background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9",
+                  padding: "7px 10px", borderRadius: 5, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace",
+                  resize: "vertical", outline: "none", lineHeight: 1.6 }} />
+            </div>
+            {/* Défauts */}
+            <div>
+              <label style={{ display: "block", fontSize: 9, color: "#4B5563", letterSpacing: 1.5,
+                textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>
+                Défauts connus
+                {f.defauts.length > 0 && <span style={{ color: "#EF4444", marginLeft: 8 }}>
+                  — coût estimé : {f.defauts.reduce((s, k) => s + (DEFAUTS[k]?.cout || 0), 0).toLocaleString("fr")} €
+                </span>}
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 5 }}>
+                {Object.entries(DEFAUTS).map(([key, df]) => {
+                  const on = f.defauts.includes(key);
+                  const c = df.risque === "critical" ? "#EF4444" : df.risque === "high" ? "#F97316" : df.risque === "medium" ? "#F59E0B" : "#6B7280";
+                  return (
+                    <div key={key} onClick={() => toggleDefaut(key)}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px",
+                        border: `1px solid ${on ? c : "#1E293B"}`, background: on ? c + "12" : "transparent",
+                        borderRadius: 4, cursor: "pointer", transition: "all .15s" }}>
+                      {on ? <CheckSquare size={11} color={c} /> : <Square size={11} color="#374151" />}
+                      <span style={{ fontSize: 11, color: on ? "#F1F5F9" : "#6B7280", lineHeight: 1.3 }}>{df.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Onglet 2 — Référentiels marché */}
+        {tab === "marche" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ padding: "10px 12px", background: "#0A1628", borderRadius: 6, fontSize: 11,
+              color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace", borderLeft: "2px solid #6366F1" }}>
+              Ces valeurs calibrent l'algorithme de scoring pour ce véhicule/pièce spécifique.
+              Laissez vide pour utiliser les valeurs génériques.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Prix excellent (€)" name="refPrixSuper" type="number" placeholder="1200" hint="En-dessous : prix suspect" />
+              <Field label="Prix max acceptable (€)" name="refPrixMax" type="number" placeholder="7000" hint="Au-dessus : hors budget" />
+              <Field label="Km excellent" name="refKmTop" type="number" placeholder="80000" hint="Score +18 pts" />
+              <Field label="Km limite" name="refKmLimite" type="number" placeholder="250000" hint="Score -30 pts" />
+              <Field label="Année min" name="refAnneeMin" type="number" placeholder="2005" hint="Millésime cible min" />
+              <Field label="Année max" name="refAnneeMax" type="number" placeholder="2009" hint="Millésime cible max" />
+              <Field label="Prix revente marché (€)" name="refRevente" type="number" placeholder="3800" hint="Valeur de revente standard" />
+            </div>
+          </div>
+        )}
+
+        {/* Onglet 3 — Frais avancés */}
+        {tab === "frais" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Distance déplacement (km)" name="distanceKm" type="number" placeholder="0"
+                hint="Coût calculé à 0.35 €/km" />
+              <Field label="Main d'œuvre (€)" name="mainOeuvre" type="number" placeholder="0"
+                hint="Votre temps ou prestataire" />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+              background: "#0A1628", borderRadius: 6, cursor: "pointer" }}
+              onClick={() => ch("tvaActive", !f.tvaActive)}>
+              {f.tvaActive ? <CheckSquare size={14} color="#6366F1" /> : <Square size={14} color="#374151" />}
+              <div>
+                <div style={{ fontSize: 12, color: "#94A3B8" }}>Appliquer la TVA sur marge</div>
+                <div style={{ fontSize: 10, color: "#374151", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  Régime de la marge — Art. 297A CGI (20% / 120 = 16.67% sur la marge brute)
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 8, marginTop: 20, paddingTop: 16, borderTop: "1px solid #1E293B" }}>
+          <Btn variant="secondary" onClick={onClose} style={{ flex: 1 }} icon={X}>Annuler</Btn>
+          <Btn variant="primary" onClick={submit} style={{ flex: 2 }} icon={Plus}>Enregistrer l'opportunité</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 10 — QUICK IMPORT (URL / texte brut)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function QuickImport({ onImport, onClose }) {
+  const [texte, setTexte] = useState("");
+  const [preview, setPreview] = useState(null);
+
+  const analyser = () => {
+    if (!texte.trim()) return;
+    setPreview(parseImportTexte(texte));
+  };
+
+  const valider = () => {
+    if (preview) { onImport(preview); onClose(); }
+  };
+
+  return (
+    <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+      <SectionHeader title="Import rapide — URL ou texte brut"
+        action={<button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#374151" }}><X size={14} /></button>} />
+      <textarea value={texte} onChange={e => setTexte(e.target.value)} rows={5}
+        placeholder={"Collez une URL d'annonce ou le texte brut ici.\nEx :\nRenault Clio 1.6 — 2007 — 145 000 km — 1 800 €\nBon état général, CT valide, courroie refaite\nhttps://www.leboncoin.fr/voitures/..."}
+        style={{ width: "100%", background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9",
+          padding: "10px 12px", borderRadius: 6, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace",
+          resize: "vertical", outline: "none", lineHeight: 1.6, marginBottom: 10 }} />
+      {preview && (
+        <div style={{ background: "#0A1628", borderRadius: 6, padding: "12px 14px", marginBottom: 10,
+          border: "1px solid #1E293B", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+          {[
+            ["Titre", preview.titre], ["Prix", preview.prix ? `${preview.prix} €` : "Non détecté"],
+            ["Km", preview.km ? `${preview.km} km` : "Non détecté"],
+            ["Année", preview.annee || "Non détectée"],
+            ["URL", preview.url || "—"],
+          ].map(([label, val]) => (
+            <div key={label}>
+              <div style={{ fontSize: 9, color: "#374151", fontFamily: "'IBM Plex Mono', monospace",
+                textTransform: "uppercase", letterSpacing: 1, marginBottom: 2 }}>{label}</div>
+              <div style={{ fontSize: 11, color: "#94A3B8", fontFamily: "'IBM Plex Mono', monospace",
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{val}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Btn onClick={analyser} variant="secondary" icon={Search} style={{ flex: 1 }}>Analyser</Btn>
+        {preview && <Btn onClick={valider} variant="primary" icon={ArrowRight} style={{ flex: 1 }}>Importer</Btn>}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 11 — VUE PIPELINE KANBAN
+// ─────────────────────────────────────────────────────────────────────────────
+
+function VuePipeline({ annonces, onStatusChange, onView }) {
+  return (
+    <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+      <div style={{ display: "flex", gap: 10, minWidth: 900 }}>
+        {PIPELINE_STATUTS.map(statut => {
+          const items = annonces.filter(a => (a.statut || "prospect") === statut.id);
+          const valeurTotale = items.reduce((s, a) => s + (parseFloat(a.prix) || 0), 0);
+          return (
+            <div key={statut.id} style={{ flex: 1, minWidth: 160 }}>
+              {/* Header colonne */}
+              <div style={{ padding: "8px 12px", background: "#0F172A",
+                border: `1px solid ${statut.color}33`, borderRadius: 6, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: statut.color, letterSpacing: 1,
+                    textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace" }}>{statut.label}</span>
+                  <span style={{ fontSize: 10, color: "#374151", fontFamily: "'IBM Plex Mono', monospace",
+                    background: "#0A1628", padding: "1px 6px", borderRadius: 3 }}>{items.length}</span>
+                </div>
+                <div style={{ fontSize: 9, color: "#374151", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2 }}>
+                  {valeurTotale > 0 ? `${valeurTotale.toLocaleString("fr")} €` : "—"}
+                </div>
+              </div>
+              {/* Items */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {items.map(a => (
+                  <div key={a.id} onClick={() => onView(a)}
+                    style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 6,
+                      padding: "10px 12px", cursor: "pointer", transition: "border-color .15s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = statut.color + "66"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#1E293B"}>
+                    <div style={{ fontSize: 11, color: "#D1D5DB", fontWeight: 500, marginBottom: 5,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.titre || "—"}</div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 11, color: "#F59E0B", fontFamily: "'IBM Plex Mono', monospace",
+                        fontWeight: 700 }}>{fmt(a.prix, " €")}</span>
+                      {a.score !== undefined && (
+                        <span style={{ fontSize: 10, color: a.verdict?.color || "#4B5563",
+                          fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>{a.score}/100</span>
+                      )}
+                    </div>
+                    {a.rentabilite?.margeNette !== undefined && (
+                      <div style={{ marginTop: 4 }}>
+                        <Delta value={a.rentabilite.margeNette} suffix=" €" />
+                      </div>
+                    )}
+                    <div style={{ marginTop: 5 }}>
+                      <SourceTag sourceId={a.source} />
+                    </div>
+                  </div>
+                ))}
+                {items.length === 0 && (
+                  <div style={{ padding: "20px 12px", textAlign: "center", fontSize: 10,
+                    color: "#1E293B", fontFamily: "'IBM Plex Mono', monospace", border: "1px dashed #1E293B",
+                    borderRadius: 6 }}>Vide</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 12 — PAGES PRINCIPALES
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PageDashboard({ annonces, onView }) {
+  const bonnes    = annonces.filter(r => r.score >= 80);
+  const pipeline  = PIPELINE_STATUTS.map(s => ({
+    ...s, count: annonces.filter(a => (a.statut || "prospect") === s.id).length,
+  }));
+  const margeTotal = annonces.filter(r => r.rentabilite?.margeNette > 0)
+    .reduce((s, r) => s + r.rentabilite.margeNette, 0);
+  const vendu = annonces.filter(a => a.statut === "vendu");
+  const gainsRealises = vendu.reduce((s, a) => s + (a.rentabilite?.margeNette || 0), 0);
+
+  const pieData = PIPELINE_STATUTS.map(s => ({
+    name: s.label, value: annonces.filter(a => (a.statut || "prospect") === s.id).length || 0,
+    color: s.color,
+  })).filter(d => d.value > 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* KPIs */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+        <KpiCard label="Opportunités totales" value={annonces.length} icon={Layers} accent="#6366F1"
+          sub={`${bonnes.length} excellent score`} />
+        <KpiCard label="Marge potentielle" value={margeTotal > 0 ? `${margeTotal.toLocaleString("fr")} €` : "—"}
+          icon={TrendingUp} accent="#10B981"
+          sub="Portefeuille actif" />
+        <KpiCard label="Gains réalisés" value={gainsRealises > 0 ? `${gainsRealises.toLocaleString("fr")} €` : "—"}
+          icon={DollarSign} accent="#F59E0B"
+          sub={`${vendu.length} dossier${vendu.length > 1 ? "s" : ""} clôturé${vendu.length > 1 ? "s" : ""}`} />
+        <KpiCard label="En pipeline actif" value={annonces.filter(a => a.statut !== "vendu").length}
+          icon={Activity} accent="#8B5CF6"
+          sub="Hors dossiers clôturés" />
+      </div>
+
+      {/* Graphiques */}
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 14 }}>
+        {/* Tendance marché */}
+        <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+          <SectionHeader title="Tendance marché — Prix moyen & Marge"
+            sub="Données historiques — 6 derniers mois" />
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={HISTORIQUE_BASE}>
+              <defs>
+                <linearGradient id="gMarge" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#10B981" stopOpacity={0.15} />
+                  <stop offset="100%" stopColor="#10B981" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="gPrix" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#6366F1" stopOpacity={0.1} />
+                  <stop offset="100%" stopColor="#6366F1" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <XAxis dataKey="periode" tick={{ fontSize: 9, fill: "#374151", fontFamily: "'IBM Plex Mono', monospace" }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 9, fill: "#374151", fontFamily: "'IBM Plex Mono', monospace" }} axisLine={false} tickLine={false} />
+              <Tooltip content={<ChartTooltip />} />
+              <Area type="monotone" dataKey="avg_prix" stroke="#6366F1" strokeWidth={1.5} fill="url(#gPrix)" name="Prix moyen (€)" />
+              <Area type="monotone" dataKey="avg_marge" stroke="#10B981" strokeWidth={1.5} fill="url(#gMarge)" name="Marge moy. (€)" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Répartition pipeline */}
+        <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+          <SectionHeader title="Répartition pipeline" />
+          {annonces.length === 0 ? (
+            <div style={{ height: 140, display: "flex", alignItems: "center", justifyContent: "center",
+              color: "#1E293B", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}>Aucune donnée</div>
+          ) : (
+            <>
+              <ResponsiveContainer width="100%" height={110}>
+                <PieChart>
+                  <Pie data={pieData} cx="50%" cy="50%" innerRadius={28} outerRadius={45} paddingAngle={2} dataKey="value">
+                    {pieData.map((e, i) => <Cell key={i} fill={e.color} />)}
+                  </Pie>
+                  <Tooltip content={<ChartTooltip />} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+                {pipeline.filter(s => s.count > 0).map(s => (
+                  <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: s.color }} />
+                      <span style={{ color: "#4B5563", fontFamily: "'IBM Plex Mono', monospace" }}>{s.label}</span>
+                    </div>
+                    <span style={{ fontWeight: 700, color: s.color, fontFamily: "'IBM Plex Mono', monospace" }}>{s.count}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Volume mensuel */}
+      <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+        <SectionHeader title="Volume d'opportunités analysées — 6 mois"
+          sub="Nombre d'annonces traitées par période" />
+        <ResponsiveContainer width="100%" height={100}>
+          <BarChart data={HISTORIQUE_BASE} barSize={20}>
+            <XAxis dataKey="periode" tick={{ fontSize: 9, fill: "#374151", fontFamily: "'IBM Plex Mono', monospace" }} axisLine={false} tickLine={false} />
+            <YAxis hide />
+            <Tooltip content={<ChartTooltip />} />
+            <Bar dataKey="volume" fill="#6366F1" opacity={0.7} radius={[2,2,0,0]} name="Volume" />
+            <Bar dataKey="nb_bonnes" fill="#10B981" opacity={0.9} radius={[2,2,0,0]} name="Bonnes affaires" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Top 5 opportunités */}
+      {annonces.filter(a => a.score !== undefined).length > 0 && (
+        <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+          <SectionHeader title="Top 5 — Meilleures opportunités"
+            sub="Classées par score de valorisation" />
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["#", "Désignation", "Prix", "Score", "Marge nette", "ROI", "Statut"].map(h => (
+                  <th key={h} style={{ padding: "6px 10px", fontSize: 9, letterSpacing: 1.5, fontWeight: 600,
+                    textTransform: "uppercase", color: "#374151", fontFamily: "'IBM Plex Mono', monospace",
+                    textAlign: h === "#" ? "center" : "left", borderBottom: "1px solid #1E293B" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {[...annonces].filter(a => a.score !== undefined)
+                .sort((a, b) => b.score - a.score).slice(0, 5).map((r, i) => (
+                <tr key={r.id} onClick={() => onView(r)} style={{ cursor: "pointer", transition: "background .1s" }}
+                  onMouseEnter={e => e.currentTarget.style.background = "#0A1628"}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                  <td style={{ padding: "8px 10px", textAlign: "center", fontFamily: "'IBM Plex Mono', monospace",
+                    fontWeight: 800, fontSize: 13, color: ["#F59E0B","#94A3B8","#CD7F32","#4B5563","#4B5563"][i] }}>
+                    {i + 1}
+                  </td>
+                  <td style={{ padding: "8px 10px", fontSize: 11, color: "#D1D5DB", maxWidth: 200,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.titre || "—"}</td>
+                  <td style={{ padding: "8px 10px", fontSize: 11, color: "#94A3B8",
+                    fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{fmt(r.prix, " €")}</td>
+                  <td style={{ padding: "8px 10px" }}><ScoreCell score={r.score} verdict={r.verdict} /></td>
+                  <td style={{ padding: "8px 10px" }}>
+                    {r.rentabilite ? <Delta value={r.rentabilite.margeNette} suffix=" €" /> : <span style={{ color: "#374151" }}>—</span>}
+                  </td>
+                  <td style={{ padding: "8px 10px" }}>
+                    {r.rentabilite ? <Delta value={r.rentabilite.roi} suffix=" %" /> : <span style={{ color: "#374151" }}>—</span>}
+                  </td>
+                  <td style={{ padding: "8px 10px" }}><StatusBadge statut={r.statut || "prospect"} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 13 — CALCULATEUR DE RENTABILITÉ STANDALONE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PageCalculateur({ calculerRentabilite }) {
+  const [p, setP] = useState({
+    prixAchat: "", prixRevente: "", coutReparation: "0",
+    distanceKm: "0", tauxKm: "0.35", mainOeuvre: "0",
+    fraisDivers: "50", tvaActive: false,
+  });
+  const [result, setResult] = useState(null);
+
+  const chE = e => setP(prev => ({ ...prev, [e.target.name]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
+
+  const calculer = () => {
+    const r = calculerRentabilite({
+      prixAchat:      parseFloat(p.prixAchat) || 0,
+      prixRevente:    parseFloat(p.prixRevente) || 0,
+      coutReparation: parseFloat(p.coutReparation) || 0,
+      distanceKm:     parseFloat(p.distanceKm) || 0,
+      tauxKm:         parseFloat(p.tauxKm) || 0.35,
+      mainOeuvre:     parseFloat(p.mainOeuvre) || 0,
+      fraisDivers:    parseFloat(p.fraisDivers) || 50,
+      tvaActive:      p.tvaActive,
+    });
+    setResult(r);
+  };
+
+  const Field = ({ label, name, type = "number", placeholder, hint }) => (
+    <div>
+      <label style={{ display: "block", fontSize: 9, color: "#4B5563", letterSpacing: 1.5,
+        textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>{label}</label>
+      <input type={type} name={name} value={p[name]} onChange={chE} placeholder={placeholder}
+        style={{ width: "100%", background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9",
+          padding: "7px 10px", borderRadius: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }}
+        onFocus={e => e.target.style.borderColor = "#6366F1"}
+        onBlur={e => e.target.style.borderColor = "#1E293B"} />
+      {hint && <p style={{ fontSize: 9, color: "#374151", marginTop: 2, fontFamily: "'IBM Plex Mono', monospace" }}>{hint}</p>}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "start" }}>
+      {/* Inputs */}
+      <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+        <SectionHeader title="Paramètres de l'opération" sub="Calculateur de rentabilité avancé" />
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Prix d'achat (€)" name="prixAchat" placeholder="2000" />
+            <Field label="Prix revente estimé (€)" name="prixRevente" placeholder="3800" />
+            <Field label="Coût réparations (€)" name="coutReparation" placeholder="400" />
+            <Field label="Frais divers (€)" name="fraisDivers" placeholder="50" hint="Assurance, carburant, misc." />
+            <Field label="Distance déplacement (km)" name="distanceKm" placeholder="0" />
+            <Field label="Taux km (€/km)" name="tauxKm" placeholder="0.35" hint="Barème kilométrique" />
+            <Field label="Main d'œuvre (€)" name="mainOeuvre" placeholder="0" hint="Votre temps ou prestataire" />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+            background: "#0A1628", borderRadius: 6, cursor: "pointer" }}
+            onClick={() => setP(prev => ({ ...prev, tvaActive: !prev.tvaActive }))}>
+            {p.tvaActive ? <CheckSquare size={14} color="#6366F1" /> : <Square size={14} color="#374151" />}
+            <div>
+              <div style={{ fontSize: 12, color: "#94A3B8" }}>TVA sur marge (Art. 297A CGI)</div>
+              <div style={{ fontSize: 10, color: "#374151", fontFamily: "'IBM Plex Mono', monospace" }}>
+                Applicable aux professionnels revendeurs — 20%/120 sur marge brute
+              </div>
+            </div>
+          </div>
+          <Btn onClick={calculer} variant="primary" icon={Calculator} style={{ width: "100%", justifyContent: "center", padding: "10px" }}>
+            Calculer la rentabilité
+          </Btn>
+        </div>
+      </div>
+
+      {/* Résultat */}
+      <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+        <SectionHeader title="Résultat de l'analyse" />
+        {!result ? (
+          <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#1E293B", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}>
+            Renseignez les paramètres et calculez
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[
+              { label: "Prix d'achat", value: fmt(p.prixAchat, " €"), color: "#94A3B8" },
+              { label: "Réparations", value: fmt(p.coutReparation, " €"), color: "#94A3B8" },
+              { label: "Logistique", value: fmt(result.fraisLogistique, " €"), color: "#94A3B8" },
+              { label: "Main d'œuvre", value: fmt(p.mainOeuvre, " €"), color: "#94A3B8" },
+              { label: "Frais divers", value: fmt(p.fraisDivers, " €"), color: "#94A3B8" },
+              null, // séparateur
+              { label: "Coût total", value: fmt(result.coutTotal, " €"), color: "#F59E0B", bold: true },
+              { label: "Prix revente", value: fmt(p.prixRevente, " €"), color: "#60A5FA", bold: true },
+              { label: "Marge avant TVA", value: fmt(result.margeAvantTVA, " €"), color: result.margeAvantTVA >= 0 ? "#10B981" : "#EF4444", bold: true },
+              p.tvaActive && { label: "TVA sur marge", value: `- ${fmt(result.tva, " €")}`, color: "#EF4444" },
+              { label: "Marge nette", value: fmt(result.margeNette, " €"), color: result.margeNette >= 0 ? "#10B981" : "#EF4444", bold: true, big: true },
+              { label: "ROI", value: fmtPct(result.roi), color: result.roi >= 0 ? "#10B981" : "#EF4444", bold: true, big: true },
+            ].filter(Boolean).map((row, i) => row === null ? (
+              <div key={i} style={{ height: 1, background: "#1E293B", margin: "4px 0" }} />
+            ) : (
+              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: row.big ? "8px 10px" : "5px 10px",
+                background: row.big ? row.color + "10" : "transparent",
+                borderRadius: row.big ? 5 : 0,
+                borderBottom: row.big ? "none" : "1px solid #0A1628" }}>
+                <span style={{ fontSize: row.big ? 12 : 11, color: "#4B5563",
+                  fontFamily: "'IBM Plex Mono', monospace" }}>{row.label}</span>
+                <span style={{ fontSize: row.big ? 16 : 12, fontWeight: row.bold ? 800 : 500,
+                  color: row.color, fontFamily: "'IBM Plex Mono', monospace" }}>{row.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 14 — PAGE ANALYSE (scanner + DataTable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PageAnalyse({ annonces, onUpdate, onDelete, onView, onToggleWatch, watchlist, scorer }) {
+  const [scanning, setScanning] = useState(false);
+  const [scraping, setScraping] = useState(false);
+  const [scrapQuery, setScrapQuery] = useState("");
+  const [scrapCat, setScrapCat] = useState("vehicule");
+  const [showImport, setShowImport] = useState(false);
+
+  const analyserTout = useCallback(() => {
+    setScanning(true);
+    setTimeout(() => {
+      const updated = annonces.map(a => {
+        // Construire les refs marché depuis les champs de l'annonce
+        const refMarche = {
+          prix: a.refPrixSuper ? {
+            super: parseFloat(a.refPrixSuper), bon: parseFloat(a.refPrixSuper) * 1.5,
+            correct: parseFloat(a.refPrixSuper) * 2.5, cher: parseFloat(a.refPrixMax) * 0.7,
+            max: parseFloat(a.refPrixMax),
+          } : null,
+          km: a.refKmTop ? {
+            top: parseInt(a.refKmTop), bon: parseInt(a.refKmTop) * 1.6,
+            ok: parseInt(a.refKmLimite) * 0.65, limite: parseInt(a.refKmLimite),
+          } : null,
+          anneeMin: parseInt(a.refAnneeMin) || null,
+          anneeMax: parseInt(a.refAnneeMax) || null,
+          revente: parseFloat(a.refRevente || a.prixRevente) || null,
+        };
+        const result = scorer(a, refMarche);
+        return { ...a, ...result };
+      });
+      onUpdate(updated);
+      setScanning(false);
+    }, 600);
+  }, [annonces, scorer, onUpdate]);
+
+  const lancerScraping = useCallback(async () => {
+    if (!scrapQuery.trim()) return;
+    setScraping(true);
+    try {
+      const items = await fetchScraper(scrapQuery, scrapCat);
+      // Scorer immédiatement
+      const scored = items.map(a => ({ ...a, ...scorer(a, null) }));
+      onUpdate([...annonces, ...scored]);
+    } finally {
+      setScraping(false);
+    }
+  }, [scrapQuery, scrapCat, annonces, scorer, onUpdate]);
+
+  const handleStatusChange = (id, statut) => {
+    onUpdate(annonces.map(a => a.id === id ? { ...a, statut } : a));
+  };
+
+  const handleImport = (parsed) => {
+    const scored = { ...parsed, ...scorer(parsed, null), id: Date.now() };
+    onUpdate([...annonces, scored]);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Barre d'outils */}
+      <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 8, alignItems: "flex-end" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 9, color: "#374151", letterSpacing: 1.5, textTransform: "uppercase",
+              fontFamily: "'IBM Plex Mono', monospace" }}>Recherche auto-import</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input value={scrapQuery} onChange={e => setScrapQuery(e.target.value)}
+                placeholder="Ex: Clio 3 1.6, moteur K4M..."
+                style={{ flex: 1, background: "#0A1628", border: "1px solid #1E293B", color: "#F1F5F9",
+                  padding: "7px 10px", borderRadius: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }}
+                onKeyDown={e => e.key === "Enter" && lancerScraping()} />
+              <select value={scrapCat} onChange={e => setScrapCat(e.target.value)}
+                style={{ background: "#0A1628", border: "1px solid #1E293B", color: "#94A3B8",
+                  padding: "7px 10px", borderRadius: 5, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }}>
+                {CATEGORIES.map(c => <option key={c.id} value={c.id} style={{ background: "#0A1628" }}>{c.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <Btn onClick={lancerScraping} variant="secondary" icon={scraping ? RefreshCw : Globe} disabled={scraping}>
+            {scraping ? "Import en cours..." : "Auto-import"}
+          </Btn>
+          <Btn onClick={() => setShowImport(v => !v)} variant="secondary" icon={Clipboard}>
+            Import texte
+          </Btn>
+          <Btn onClick={analyserTout} variant="primary" icon={scanning ? RefreshCw : Zap} disabled={scanning || annonces.length === 0}>
+            {scanning ? "Analyse..." : `Analyser (${annonces.length})`}
+          </Btn>
+        </div>
+
+        {showImport && (
+          <div style={{ marginTop: 14 }}>
+            <QuickImport onImport={handleImport} onClose={() => setShowImport(false)} />
+          </div>
+        )}
+      </div>
+
+      {/* DataTable */}
+      <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+        <SectionHeader title="Tableau des opportunités"
+          sub={`${annonces.length} enregistrement${annonces.length > 1 ? "s" : ""}`}
+          action={
+            <div style={{ display: "flex", gap: 6 }}>
+              <Btn size="sm" variant="secondary" onClick={() => exportCSV(annonces)} icon={Download}>Export CSV</Btn>
+            </div>
+          } />
+        <DataTable
+          data={annonces}
+          onView={onView}
+          onDelete={onDelete}
+          onStatusChange={handleStatusChange}
+          onToggleWatch={onToggleWatch}
+          watchlist={watchlist} />
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 15 — APP PRINCIPALE
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NAV = [
+  { id: "dashboard",  label: "Tableau de bord",   icon: LayoutDashboard },
+  { id: "analyse",    label: "Opportunités",        icon: BarChart2 },
+  { id: "pipeline",   label: "Pipeline",            icon: Layers },
+  { id: "calculateur",label: "Calculateur",         icon: Calculator },
+  { id: "watchlist",  label: "Watchlist",           icon: Star },
+];
+
+export default function App() {
+  const [page, setPage]         = useState("dashboard");
+  const [annonces, setAnnonces] = useState([]);
+  const [watchlist, setWatchlist] = useState([]);
+  const [showAdd, setShowAdd]   = useState(false);
+  const [detailItem, setDetail] = useState(null);
+  const { scorer, calculerRentabilite } = useValuation();
+
+  // Persistance
+  useEffect(() => {
+    try {
+      const a = localStorage.getItem("sk7_annonces");
+      const w = localStorage.getItem("sk7_watchlist");
+      if (a) setAnnonces(JSON.parse(a));
+      if (w) setWatchlist(JSON.parse(w));
+    } catch {}
+  }, []);
+  useEffect(() => { try { localStorage.setItem("sk7_annonces", JSON.stringify(annonces)); } catch {} }, [annonces]);
+  useEffect(() => { try { localStorage.setItem("sk7_watchlist", JSON.stringify(watchlist)); } catch {} }, [watchlist]);
+
+  const handleAdd = useCallback(a => {
+    const scored = { ...a, ...scorer(a, {
+      prix: a.refPrixSuper ? {
+        super: parseFloat(a.refPrixSuper), bon: parseFloat(a.refPrixSuper) * 1.5,
+        correct: parseFloat(a.refPrixSuper) * 2, cher: parseFloat(a.refPrixMax) * 0.7,
+        max: parseFloat(a.refPrixMax),
+      } : null,
+      revente: parseFloat(a.refRevente || a.prixRevente) || null,
+    }) };
+    setAnnonces(prev => [...prev, scored]);
+  }, [scorer]);
+
+  const handleUpdate    = useCallback(updated => setAnnonces(updated), []);
+  const handleDelete    = useCallback(id => setAnnonces(prev => prev.filter(a => a.id !== id)), []);
+  const handleWatch     = useCallback(id => setWatchlist(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]), []);
+  const handleStatusCh  = useCallback((id, statut) => setAnnonces(prev => prev.map(a => a.id === id ? { ...a, statut } : a)), []);
+
+  const favs  = annonces.filter(a => watchlist.includes(a.id));
+  const title = NAV.find(n => n.id === page)?.label || "";
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body { background: #020817; color: #F1F5F9; font-family: 'IBM Plex Sans', sans-serif; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+        button, input, select, textarea { font-family: inherit; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: #0A1628; }
+        ::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 2px; }
+        ::-webkit-scrollbar-thumb:hover { background: #374151; }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .page-fade { animation: fadeUp 0.25s ease; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spin { animation: spin 1s linear infinite; }
+        @media (max-width: 720px) { .sidebar { display: none !important; } .mob-nav { display: flex !important; } }
+      `}</style>
+
+      <div style={{ display: "flex", minHeight: "100vh" }}>
+        {/* ── SIDEBAR ── */}
+        <aside className="sidebar" style={{ width: 216, flexShrink: 0, background: "#030D1A",
+          borderRight: "1px solid #0B1929", position: "sticky", top: 0, height: "100vh",
+          display: "flex", flexDirection: "column", overflowY: "auto" }}>
+
+          {/* Logo */}
+          <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid #0B1929" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 28, height: 28, background: "#6366F1", borderRadius: 4,
+                display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Target size={14} color="#fff" />
+              </div>
+              <div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 13,
+                  color: "#F1F5F9", letterSpacing: 0.5 }}>SK AutoFlip</div>
+                <div style={{ fontSize: 8, letterSpacing: 2, color: "#1E3A5F",
+                  textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace" }}>Enterprise v7.0</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Nav principale */}
+          <div style={{ padding: "10px 8px", flex: 1 }}>
+            <div style={{ fontSize: 8, letterSpacing: 2.5, color: "#0F2744", textTransform: "uppercase",
+              fontFamily: "'IBM Plex Mono', monospace", padding: "0 8px", marginBottom: 5 }}>Modules</div>
+            {NAV.map(n => {
+              const Icon = n.icon;
+              const active = page === n.id;
+              return (
+                <div key={n.id} onClick={() => setPage(n.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 10px",
+                    margin: "1px 0", borderRadius: 5, cursor: "pointer", transition: "all .12s",
+                    color: active ? "#F1F5F9" : "#374151", fontWeight: active ? 600 : 400,
+                    background: active ? "rgba(99,102,241,0.12)" : "transparent",
+                    borderLeft: active ? "2px solid #6366F1" : "2px solid transparent",
+                    fontSize: 12 }}>
+                  <Icon size={14} style={{ flexShrink: 0 }} />
+                  <span style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{n.label}</span>
+                  {n.id === "watchlist" && watchlist.length > 0 && (
+                    <span style={{ marginLeft: "auto", fontSize: 9, fontWeight: 800, background: "#F59E0B22",
+                      color: "#F59E0B", padding: "1px 5px", borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {watchlist.length}
+                    </span>
+                  )}
+                  {n.id === "analyse" && annonces.length > 0 && (
+                    <span style={{ marginLeft: "auto", fontSize: 9, fontWeight: 800, background: "#6366F122",
+                      color: "#6366F1", padding: "1px 5px", borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {annonces.length}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Actions rapides */}
+          <div style={{ padding: "10px 10px 16px", borderTop: "1px solid #0B1929" }}>
+            <button onClick={() => setShowAdd(true)}
+              style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "9px 10px",
+                background: "#6366F1", border: "none", borderRadius: 5, color: "#fff", cursor: "pointer",
+                fontSize: 12, fontWeight: 600, fontFamily: "'IBM Plex Sans', sans-serif", transition: "background .15s" }}
+              onMouseEnter={e => e.currentTarget.style.background = "#4F46E5"}
+              onMouseLeave={e => e.currentTarget.style.background = "#6366F1"}>
+              <Plus size={13} /> Nouvelle opportunité
+            </button>
+
+            {/* Stats sidebar */}
+            <div style={{ marginTop: 12 }}>
+              {[
+                { label: "Total", val: annonces.length, color: "#6366F1" },
+                { label: "Analysés", val: annonces.filter(a => a.score !== undefined).length, color: "#10B981" },
+                { label: "Watchlist", val: watchlist.length, color: "#F59E0B" },
+                { label: "Vendus", val: annonces.filter(a => a.statut === "vendu").length, color: "#94A3B8" },
+              ].map(({ label, val, color }) => (
+                <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                  padding: "4px 4px", borderBottom: "1px solid #0B1929" }}>
+                  <span style={{ fontSize: 9, color: "#1E3A5F", fontFamily: "'IBM Plex Mono', monospace",
+                    textTransform: "uppercase", letterSpacing: 1 }}>{label}</span>
+                  <span style={{ fontSize: 12, fontWeight: 800, color, fontFamily: "'IBM Plex Mono', monospace" }}>{val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        {/* ── MAIN ── */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+          {/* Topbar */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "11px 20px", borderBottom: "1px solid #0B1929", background: "#030D1A",
+            position: "sticky", top: 0, zIndex: 20, backdropFilter: "blur(10px)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700,
+                color: "#F1F5F9", letterSpacing: 0.5, textTransform: "uppercase" }}>{title}</div>
+              <ChevronRight size={12} color="#1E3A5F" />
+              <span style={{ fontSize: 10, color: "#374151", fontFamily: "'IBM Plex Mono', monospace" }}>
+                {new Date().toLocaleDateString("fr-FR", { weekday: "short", year: "numeric", month: "short", day: "numeric" })}
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9,
+                color: "#10B981", fontFamily: "'IBM Plex Mono', monospace", letterSpacing: 1 }}>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#10B981",
+                  boxShadow: "0 0 0 2px rgba(16,185,129,0.2)" }} />
+                SYSTÈME OPÉRATIONNEL
+              </div>
+              <Btn size="sm" variant="secondary" icon={Download} onClick={() => exportCSV(annonces)}>Export</Btn>
+              <Btn size="sm" variant="primary" icon={Plus} onClick={() => setShowAdd(true)}>Ajouter</Btn>
+            </div>
+          </div>
+
+          {/* Mobile nav */}
+          <div className="mob-nav" style={{ display: "none", padding: "8px 14px", gap: 6,
+            overflowX: "auto", borderBottom: "1px solid #0B1929", background: "#030D1A" }}>
+            {NAV.map(n => {
+              const Icon = n.icon;
+              return (
+                <button key={n.id} onClick={() => setPage(n.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px",
+                    background: page === n.id ? "rgba(99,102,241,0.15)" : "#0F172A",
+                    border: `1px solid ${page === n.id ? "#6366F1" : "#1E293B"}`,
+                    color: page === n.id ? "#6366F1" : "#374151",
+                    borderRadius: 5, fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", flexShrink: 0 }}>
+                  <Icon size={11} />{n.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Contenu page */}
+          <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+            <div className="page-fade" key={page}
+              style={{ maxWidth: 1100, margin: "0 auto", padding: "22px 20px 80px" }}>
+              {page === "dashboard"   && <PageDashboard annonces={annonces} onView={setDetail} />}
+              {page === "analyse"     && <PageAnalyse annonces={annonces} onUpdate={handleUpdate} onDelete={handleDelete} onView={setDetail} onToggleWatch={handleWatch} watchlist={watchlist} scorer={scorer} />}
+              {page === "pipeline"    && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                  <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+                    <SectionHeader title="Vue Pipeline" sub="Glissez les dossiers entre les colonnes via le menu statut" />
+                    <VuePipeline annonces={annonces} onStatusChange={handleStatusCh} onView={setDetail} />
+                  </div>
+                </div>
+              )}
+              {page === "calculateur" && <PageCalculateur calculerRentabilite={calculerRentabilite} />}
+              {page === "watchlist"   && (
+                <div>
+                  <div style={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 8, padding: 18 }}>
+                    <SectionHeader title="Watchlist" sub={`${favs.length} opportunité${favs.length > 1 ? "s" : ""} surveillée${favs.length > 1 ? "s" : ""}`} />
+                    {favs.length === 0 ? (
+                      <div style={{ textAlign: "center", padding: "60px 20px", color: "#1E293B",
+                        fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                        Aucun élément — marquez des annonces avec l'étoile dans le tableau
+                      </div>
+                    ) : (
+                      <DataTable data={favs} onView={setDetail} onDelete={handleDelete}
+                        onStatusChange={handleStatusCh} onToggleWatch={handleWatch} watchlist={watchlist} />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div style={{ padding: "8px 20px", borderTop: "1px solid #0B1929", background: "#030D1A",
+            display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 9, color: "#0F2744", fontFamily: "'IBM Plex Mono', monospace", letterSpacing: 1 }}>
+              SK AUTOFLIP ENTERPRISE v7.0 — CAR & PARTS ARBITRAGE PLATFORM
+            </span>
+            <span style={{ fontSize: 9, color: "#0F2744", fontFamily: "'IBM Plex Mono', monospace" }}>
+              {annonces.length} DOSSIERS · {annonces.filter(a => a.score >= 80).length} OPPORTUNITÉS PREMIUM
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Modals */}
+      {showAdd     && <FormulaireAjout onAdd={handleAdd} onClose={() => setShowAdd(false)} />}
+      {detailItem  && <ModalDetail annonce={detailItem} onClose={() => setDetail(null)} onStatusChange={(id, s) => { handleStatusCh(id, s); setDetail(prev => ({ ...prev, statut: s })); }} />}
+    </>
+  );}
